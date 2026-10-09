@@ -42,7 +42,8 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
 if not BOT_TOKEN:
     raise RuntimeError("Не найден BOT_TOKEN. Задайте переменную окружения BOT_TOKEN.")
 
-ENV_CHAT_ID = os.environ.get("CHAT_ID", "").strip()      # например -1002034080349
+ENV_CHAT_ID = os.environ.get("CHAT_ID", "").strip()      # -1002034080349 (можно несколько через запятую; первый = рабочий)
+TEST_MODE = os.environ.get("TEST_MODE", "").strip().lower() in ("1", "true", "yes")  # тест: бот реагирует и на аккаунт владельца
 STATE_FILE = os.environ.get("STATE_FILE", "state.json")
 
 try:
@@ -58,7 +59,7 @@ SELF_SPAM_LIMIT = 4       # сколько сообщений бота подр�
 HUMAN_BURST_SEC = 75      # если люди только что писали — не перебиваем
 SLOT_GRACE_MIN = 25       # сколько минут после времени слота бот ещё может его выполнить
 PHOTO_REACTORS_NEEDED = 2  # сколько людей должны поставить 👍/🔥 на фото чека
-MAX_PRAISE_PER_DAY = 5
+MAX_PRAISE_PER_DAY = 8
 
 HQ_MARKERS = ("ᴋɴɴᴠsᴋʏ", "knnvsky")           # официальный аккаунт головного офиса — не трогаем
 BOSS_MARKERS = ("гусев", "стелла яссин")      # руководители, которые постят красивые чеки
@@ -121,6 +122,8 @@ class RT:
     greeted: set = set()
     photo_watch: dict = {}
     last_bday = 0.0
+    sit_done: set = set()
+    last_sit = 0.0
 
 
 def load_state() -> None:
@@ -145,13 +148,26 @@ def save_state() -> None:
         log.warning("Не удалось сохранить состояние: %s", e)
 
 
+def env_chat_ids() -> list:
+    ids = []
+    for part in ENV_CHAT_ID.split(","):
+        part = part.strip()
+        if part:
+            try:
+                ids.append(int(part))
+            except ValueError:
+                pass
+    return ids
+
+
 def get_chat_id():
-    if ENV_CHAT_ID:
-        try:
-            return int(ENV_CHAT_ID)
-        except ValueError:
-            pass
-    return STATE.get("chat_id")
+    ids = env_chat_ids()
+    return ids[0] if ids else STATE.get("chat_id")
+
+
+def is_allowed_chat(cid: int) -> bool:
+    ids = env_chat_ids()
+    return cid in ids if ids else cid == STATE.get("chat_id")
 
 
 bot = Bot(token=BOT_TOKEN)
@@ -199,6 +215,18 @@ def calc_pct(plan, fact, closed):
     return None
 
 
+def _cat_fact(lines: list, pattern: str):
+    for l in lines:
+        if re.match(pattern, l, re.IGNORECASE):
+            nums = [int(x) for x in re.findall(r"\d+", l)]
+            if ("+" in l or re.search(r"закр[иы]т", l, re.IGNORECASE)) and nums:
+                return nums[-1]
+            if len(nums) >= 2:
+                return nums[1]
+            return None
+    return None
+
+
 def parse_report(text: str):
     """Возвращает dict(plan, fact, closed, pct, shift, tomorrow) или None."""
     if not text or len(text) > 1800:
@@ -229,6 +257,9 @@ def parse_report(text: str):
     return {
         "plan": plan, "fact": fact, "closed": closed,
         "pct": calc_pct(plan, fact, closed), "shift": shift, "tomorrow": tomorrow,
+        "trade": _cat_fact(lines, r"^\W*(?:трейд|trade)"),
+        "ins": _cat_fact(lines, r"^\W*(?:стр|страх)"),
+        "late": bool(re.search(r"поздн|опозд|извин|вибач", t, re.IGNORECASE)),
     }
 
 
@@ -303,6 +334,19 @@ def build_yesterday(today: date):
     lines = [f"📊 <b>Итоги вчера:</b> вечерний отчёт сдали {len(ev)} точек, план закрыли {closed}."]
     for i, (s, p) in enumerate(ranked[:3]):
         lines.append(f"{medals[i]} {escape(s)} — {pct_str(p)}")
+    streaks = []
+    for st, _ in ranked:
+        days = 0
+        for back in range(1, 8):
+            e = day_entries((today - timedelta(days=back)).isoformat(), "evening").get(st)
+            if e and e.get("pct") is not None and e["pct"] >= 100:
+                days += 1
+            else:
+                break
+        if days >= 3:
+            streaks.append((days, st))
+    for days, st in sorted(streaks, reverse=True)[:2]:
+        lines.append(pick_bag("streak", SITUATIONS["streak"]).format(store=escape(st), days=days))
     lines.append("Сегодня берём новые высоты 💪")
     return "\n".join(lines)
 
@@ -424,17 +468,241 @@ PRAISE_CREDIT = ["💳 Продажа в кредит — в самую точк
 PRAISE_WARRANTY = ["🛡 Ещё и с гарантией — это уже высший пилотаж! 💪"]
 PRAISE_FLAGSHIP = ["📱 Флагман в чеке — аплодисменты! 👏"]
 
+# ---- Ещё 20 часовых шуток (добавляются в общий пул)
+JOKES["general"] += [
+    "📱 Самый быстрый процесс в мире: клиент говорит «мне только спросить» и берёт чехол, стекло и зарядку.",
+    "🔍 «Покажите, который подешевле» — и тут же: «а он хороший?» Мы всё понимаем, мы тоже люди.",
+    "🧩 Кто сказал, что продавцы не знают математики? Скидка 5% + подарок + рассрочка — считаем в уме за секунду.",
+    "👓 Клиент без очков читает мелкий шрифт на коробке — настоящий герой, достойный стекла-антишпиона.",
+    "🥇 Если продавец смог объяснить бабушке eSIM — ему можно доверить любой план.",
+    "🎁 Подарочная упаковка делает чудеса: телефон тот же, а клиент счастлив вдвое.",
+    "🕰 В магазине два времени: «до обеда» и «после того как все уже ушли». Лови клиента вовремя!",
+    "📊 Статистика не врёт: чем больше улыбок на кассе, тем длиннее чек. Проверено на всех 16 точках.",
+    "🧯 Лайфхак: если клиент торгуется, предложите чехол в подарок — торговаться перестанут, начнут радоваться.",
+    "🔧 Сервис — это когда вы чините экран, а клиент приходит за новым телефоном. Круговорот выручки в природе!",
+    "📞 Телефон звонит громче всего, когда вы объясняете клиенту тарифы. Закон природы.",
+    "🏆 Любой план — это просто много маленьких чеков, собранных в одну красивую цифру.",
+    "🦸 Тот, кто с утра улыбается клиентам, вечером читает свою цифру в отчёте с улыбкой. Магия!",
+    "🔁 «Я зайду позже» — один из самых оптимистичных прогнозов в рознице. Но иногда сбывается!",
+    "🧊 Пока клиент выбирает цвет, продавец уже придумал три аргумента. Мы готовы ко всему.",
+    "📈 Если график продаж идёт вниз — разверните его на 180°. Шутка. Просто продайте ещё одно стекло.",
+    "💬 Хорошая консультация — это когда клиент уходит с мыслью «мне здесь всё объяснили». И с пакетом.",
+    "🥤 Вода на кассе, улыбка на лице, план в голове. Минимальный набор настоящего продавца.",
+    "🛍 «Скажите, а есть что-то подобное, но другое?» Классика, которую мы любим за стабильность.",
+    "🙂 Никто не продаёт телефоны так, как вы. Остальные просто стоят рядом с коробками.",
+]
+
+# ---- Реплики для ситуаций (по 10 штук). Поля: {store} {p} {fact} {ins}
+SITUATIONS = {
+    # план закрыт уже к обеду
+    "plan_midday": [
+        "🔥 {store} закрыл план уже к обеду{p}! Вот это темп 👏",
+        "👑 {store}: план к обеду{p}. Остальные, берите пример!",
+        "🚀 {store} взлетел раньше всех — план закрыт до обеда{p}!",
+        "💥 К обеду {store} уже выполнил план{p}. Что вы ели на завтрак?",
+        "😎 {store} делает обеденный перерыв с чувством выполненного плана{p}!",
+        "🏆 План к обеду — это уровень. {store}, вы показали класс{p}!",
+        "⚡ {store}, вы быстрее кассы! План закрыт до обеда{p}.",
+        "🎯 В яблочко! {store} закрыл план к обеду{p}. Так держать!",
+        "🍾 {store}: план до обеда{p}. Можно официально гордиться!",
+        "🌟 Пока другие думают об обеде, {store} уже думает о перевыполнении{p}!",
+    ],
+    # трейд-ин >= 2 к обеду
+    "trade": [
+        "🔄 {store}: два трейд-ина к обеду — вот это работа с клиентом!",
+        "♻️ {store} принимает старые телефоны как профи. Трейд-ин к обеду — респект!",
+        "📲 {store}, сразу несколько трейд-инов! Клиенты явно доверяют вашему совету.",
+        "🤝 Трейд-ин — это когда клиент приходит со старым, а уходит с новым. {store}, вы мастера!",
+        "💼 {store} делает трейд-ины пачками. Хороший ход — так держать!",
+        "🎉 Трейд-ины у {store} идут отлично. Старые телефоны нашли новые руки!",
+        "🔥 {store}, обмен идёт! Трейд-ин — фокус дня, и вы его выполняете.",
+        "👏 {store}: аплодисменты за трейд-ины. Клиентам выгодно, нам приятно.",
+        "😎 Трейд-ин сегодня решает вопрос «дорого». {store} это уже поняли!",
+        "🏅 {store} в зоне трейд-ин-героев. Остальным есть куда стремиться!",
+    ],
+    # крупная выручка к обеду (>= 40 000)
+    "big": [
+        "💰 {store} уже к обеду на {fact} грн — отличное начало дня!",
+        "🐋 У {store} к обеду {fact} грн. Крупная рыба зашла в магазин?",
+        "💸 {fact} грн к обеду у {store} — вот это размах!",
+        "🚀 {store}: {fact} грн к обеду. Касса работает в турбо-режиме!",
+        "😎 {store} к обеду набрал {fact} грн. Так держать, команда!",
+        "🔥 К обеду {fact} грн у {store} — вечером будет рекорд?",
+        "👑 {store} задаёт темп: {fact} грн до обеда!",
+        "🏆 {fact} грн к обеду — {store} показывает класс продаж!",
+        "💎 Дорогой чек у {store}: уже {fact} грн за первую половину дня. Респект!",
+        "🎯 {store}, {fact} грн к обеду — снимаем шляпу!",
+    ],
+    # страховки >= 1000 к обеду
+    "ins": [
+        "🛡 {store}: страховки к обеду на {ins} грн — вот это умение!",
+        "🔒 {store} продаёт спокойствие: {ins} грн по страховкам уже к обеду!",
+        "👏 Страховки у {store} идут отлично — {ins} грн к обеду. Клиенты в надёжных руках!",
+        "😎 {store} объясняет клиентам, зачем нужна защита. {ins} грн в страховках — результат налицо!",
+        "💪 {ins} грн в страховках у {store} к обеду. Так держать, мастера допродаж!",
+        "🏅 Страховка — не навязывание, а забота. {store} это доказал: {ins} грн!",
+        "🛠 {store}, {ins} грн по страховкам к обеду! Клиентские экраны вам благодарны заранее.",
+        "🔥 Страхование у {store} в огне: {ins} грн уже к обеду!",
+        "🧠 Умный клиент берёт страховку. {store}, у вас таких клиентов уже на {ins} грн!",
+        "🎯 {store}: {ins} грн в страховках. Вот что значит работать с аргументами!",
+    ],
+    # нулевые продажи к обеду (раз в день, мягко)
+    "zero": [
+        "☕ {store}, к обеду тихо? Бывает: клиенты копят силы на вечер. Всё впереди!",
+        "🌤 {store}, затишье перед бурей. Включаем улыбку — клиенты вот-вот подтянутся!",
+        "💪 {store}, у обеда всегда есть шанс всё изменить. Вперёд, вторая половина дня ваша!",
+        "🙂 {store}, ноль к обеду — это просто чистая страница. Пишите красиво!",
+        "🔋 {store}, заряжаемся кофе и улыбками — вечер ещё впереди!",
+        "🍀 {store}, сегодня просто день с поздним стартом. Клиенты будут!",
+        "🌈 {store}, после затишья всегда приходят хорошие чеки. Держимся!",
+        "🧭 {store}, план далеко, но вы ближе, чем кажется. Вечер всё расставит!",
+        "😌 {store}, спокойствие, только спокойствие. Покупатели уже в пути!",
+        "🚶 {store}, пока клиентов нет — самое время поправить витрину. Потом толпа придёт!",
+    ],
+    # все точки сдали утренний отчёт
+    "all_morning": [
+        "🎉 Все точки сдали утренний отчёт! Дисциплина на высоте, команда!",
+        "👏 Утренние отчёты — 100% сданы. Вот это слаженная работа!",
+        "☀️ Все магазины на связи и с утренними цифрами. Прекрасное начало дня!",
+        "🫡 Полный комплект утренних отчётов. Респект всем сменам!",
+        "💪 Ни одной пропущенной точки на утро. Так держать, филиал!",
+        "😎 Утренние отчёты собраны полностью. Можно идти за кофе!",
+        "🏆 Все 100% точек отчитались утром. Железная дисциплина!",
+        "🔥 Утро началось правильно: все отчёты на месте.",
+        "🤝 Все сдали вовремя — команда работает как часы!",
+        "🥳 Утренний отчёт сдан всеми! Так и надо начинать день.",
+    ],
+    # все точки сдали обеденный отчёт
+    "all_midday": [
+        "🎉 Все точки сдали обеденный отчёт! Дисциплина на высоте!",
+        "👏 Обеденные цифры от всех магазинов получены. Отличная работа!",
+        "🫡 Полный комплект обеденных отчётов — респект всем!",
+        "😎 Ни одной пропущенной точки к обеду. Так держать, филиал!",
+        "💪 Все отчитались к обеду. Вторая половина дня — на рекорды!",
+        "🏆 100% обеденных отчётов — это команда!",
+        "🔥 Обед, а цифры уже у всех. Вот это порядок!",
+        "🤝 Все магазины отчитались вовремя — слаженная работа!",
+        "🥳 Обеденные отчёты собраны полностью. Можно выдохнуть и продолжать!",
+        "✅ Все отчёты на месте. Теперь только вперёд, к вечеру!",
+    ],
+    # вечерний отчёт сдан ДО 18:00 с выполненным планом
+    "early": [
+        "🏁 {store} закрыл день с планом ещё до 18:00{p}! Вот это класс!",
+        "🔥 {store} отчитался раньше времени — план выполнен{p}. Респект!",
+        "👑 {store}: план закрыт, отчёт сдан до 18:00{p}. Образцовая смена!",
+        "🚀 {store}, вы финишировали раньше всех{p}! Аплодисменты!",
+        "😎 {store} сдал вечерний отчёт до 18:00 с планом{p}. Это стиль!",
+        "💪 Рано закрыть план — это искусство. {store}, браво{p}!",
+        "🏆 {store} уже на финише{p}. Остальным — догонять!",
+        "🎯 {store}: план выполнен, отчёт сдан{p}. Идеальный день!",
+        "🥳 {store} сегодня впереди планеты всей{p}!",
+        "🌟 Пока другие добивают, {store} уже подводит итоги{p}!",
+    ],
+    # извинение за поздний отчёт
+    "late": [
+        "😉 Бывает! Главное — цифры на месте.",
+        "🤝 Принято, поздно — не значит плохо. Спасибо, что сдали!",
+        "☕ Ничего страшного, цифры дошли — это главное.",
+        "🙂 Не переживайте, все иногда задерживаются. Отчёт получен!",
+        "👌 Принято! Лучше поздно, чем никогда.",
+        "🫡 Отчёт получен, претензий нет. Работаем дальше!",
+        "😌 Всё в порядке, цифры на месте. Спасибо!",
+        "💪 Бывает у всех. Главное, что отчёт теперь с нами!",
+        "🤗 Не страшно, дело житейское. Спасибо за отчёт!",
+        "✅ Принято. Спасибо, что не забыли!",
+    ],
+    # коллега прощается с работой
+    "farewell": [
+        "🤗 Спасибо за работу и тёплые слова. Удачи на новом пути!",
+        "🫡 Было приятно работать вместе. Пусть дальше всё сложится отлично!",
+        "🌟 Спасибо за вклад в команду. Успехов во всём, что впереди!",
+        "🤝 Благодарим за труд и отношение к команде. Удачи вам!",
+        "💛 Спасибо, что были частью команды. Всего самого доброго!",
+        "🍀 Пусть новый этап будет ещё лучше. Спасибо за всё!",
+        "🙏 Спасибо за совместную работу. Пусть всё получится!",
+        "🌈 Хорошего вам пути и классных перемен!",
+        "👏 Команда благодарит вас за работу. Удачи!",
+        "☀️ Спасибо за всё. Пусть впереди будет только лучшее!",
+    ],
+    # первое число месяца (утреннее приветствие)
+    "month_start": [
+        "🗓 Новый месяц — новый план! Стартуем бодро, команда!",
+        "🚀 Первое число: чистый лист и чистая цифра. Погнали!",
+        "☀️ Доброе утро! Новый месяц начинается с красивых чеков.",
+        "💪 Сегодня старт месяца: каждый чек — шаг к плану. Вперёд!",
+        "🔥 Новый месяц — новые рекорды. Открываем сезон продаж!",
+        "🎯 Первое число — время взять хороший темп. Погнали!",
+        "😎 План месяца ждёт. Начинаем сильно!",
+        "🏁 Месяц стартовал — гонка за планом открыта!",
+        "🌟 Новый месяц, новые клиенты, новые победы. Вперёд!",
+        "☕ Первый день месяца: кофе, улыбка и план. Всё готово!",
+    ],
+    # последний день месяца
+    "month_end": [
+        "📅 Последний день месяца! Добиваем план, команда!",
+        "🔥 Финальный рывок месяца. Каждый чек сегодня на вес золота!",
+        "🏁 Месяц закрывается сегодня — давайте закроем красиво!",
+        "💪 Последний день: плюс один чек — плюс один шаг к цели!",
+        "🚀 Сегодня закрываем месяц. Выкладываемся на максимум!",
+        "🎯 Сегодня день, когда плановые цифры становятся реальными. Вперёд!",
+        "😎 Финишная прямая месяца. Улыбаемся и продаём!",
+        "☕ Последний день месяца: кофе покрепче, настрой помощнее!",
+        "🥇 Кто закроет месяц с плюсом — тот герой. Погнали!",
+        "⚡ Месяц на исходе, а мы только набираем обороты!",
+    ],
+    # новогодние даты (31 декабря / 1 января)
+    "newyear": [
+        "🎄 Праздничное настроение объявляется открытым! Улыбаемся клиентам шире обычного.",
+        "🎁 Новогодний ажиотаж в магазинах — отличное время для красивых чеков. Погнали!",
+        "✨ Пусть сегодня чеки будут как подарки: приятные и крупные!",
+        "🥂 Праздничный день — праздничные продажи. Удачной смены!",
+        "🎅 Даже Санта хотел бы работать в магазине связи. Хорошего дня, команда!",
+        "🎉 Праздник на пороге, а клиенты за подарками. Вперёд!",
+        "❄️ Снег за окном, план в голове, улыбка на лице. Отличной смены!",
+        "🍾 Пусть наступающие дни принесут вам столько же радости, сколько клиентам — новые телефоны!",
+        "🌟 Желаю всем лёгкой смены и тёплых праздников!",
+        "🎈 Праздничного настроения и хороших продаж, команда!",
+    ],
+    # 8 марта
+    "women": [
+        "🌷 С 8 Марта, дорогие коллеги! Пусть этот день будет тёплым, а цветы — самыми красивыми!",
+        "💐 Поздравляем всех девушек команды с праздником! Вы — наша сила!",
+        "🌸 С 8 Марта! Пусть настроение будет весенним, а чеки — крупными.",
+        "🎀 Желаем всем девушкам филиала тепла, улыбок и приятных сюрпризов!",
+        "✨ С праздником весны! Вы делаете работу ярче каждый день.",
+        "🌺 Пусть весна приносит радость, а планы выполняются легко!",
+        "💛 С 8 Марта! Спасибо за вашу работу и позитив.",
+        "🌼 Самым лучшим коллегам — самого лучшего настроения сегодня!",
+        "🥰 Цветов, комплиментов и красивых чеков в этот день!",
+        "🍀 С 8 Марта, прекрасные продавцы! Удачной смены!",
+    ],
+    # серия: план закрыт N дней подряд (вставляется в утренние итоги)
+    "streak": [
+        "🔥 Серия: {store} закрывает план {days} дн. подряд!",
+        "🏅 {store} держит планку уже {days} дн. подряд. Вот это стабильность!",
+        "👑 {store}: {days} дн. подряд с выполненным планом. Респект!",
+        "🚀 У {store} уже {days} дн. подряд план выполнен. Так держать!",
+        "💪 {store} в серии: {days} дн. без пропусков по плану!",
+        "😎 Стабильный {store}: план закрыт {days} дн. подряд!",
+        "🎯 {store}: {days} дн. подряд попадает в цель!",
+        "🥇 {store} не сбавляет темп — {days} дн. подряд с планом!",
+        "⚡ {store}, {days} дн. подряд на высоте. Огонь!",
+        "🌟 Серия у {store} продолжается: {days} дн. подряд с планом!",
+    ],
+}
+
 # ============================ ТРИГГЕРЫ ============================
 TECH_RE = re.compile(
-    r"(?:1\s?[сc].{0,25}(?:не\s?работ|завис|вис|лег|лёг|упал|тормоз|глюч|не\s?груз))|сбой|збій|"
+    r"(?:(?:не\s?получается|не\s?работает|не\s?откр\w+|завис\w*|не\s?груз\w+).{0,40}\b1\s?[сc]\b)|"
+    r"(?:1\s?[сc].{0,30}(?:не\s?работ|не\s?получается|завис|вис|лег|лёг|упал|тормоз|глюч|не\s?груз|не\s?откр))|сбой|збій|"
     r"не\s?работает|не\s?працює|нет\s+связи|нема\s+зв.язку|техн\w+\s+проблем",
     re.IGNORECASE,
 )
 TECH_FIXED_RE = re.compile(r"заработал|запрацював|уже\s+работает|вже\s+працює|всё\s+ок|все\s+ок", re.IGNORECASE)
 POWER_RE = re.compile(r"свет\s*[+\-–]|генератор\s*[+\-–]|світл\w*\s*[+\-–]", re.IGNORECASE)
 SERIOUS_RE = re.compile(
-    r"бригад|броник|амуниц|каска|збір\b|сбор\s+(?:средств|денег)|донат|всу\b|зсу\b|загинул|загибл|погиб|"
-    r"прощан|похорон|памят[иь]|співчу|соболезн|умер|помер",
+    r"бригад|броник|амуниц|\bкаска\b|збір\b|сбор\s+(?:средств|денег)|донат|\bвсу\b|\bзсу\b|загинул|загибл|погиб|"
+    r"прощан|похорон|светлая\s+память|вічна\s+пам|вечная\s+память|співчу|соболезн|\bумер(?:ла|ли|ший)?\b|\bпомер",
     re.IGNORECASE,
 )
 FAREWELL_RE = re.compile(r"последн\w+\s+рабоч|остан\w+\s+робоч", re.IGNORECASE)
@@ -504,6 +772,21 @@ def pick_bag(cat: str, items: list) -> str:
     return items[bag.pop()]
 
 
+HOLIDAYS = {(1, 1): "newyear", (12, 31): "newyear", (3, 8): "women"}
+
+
+def open_text(n: datetime) -> str:
+    cat = HOLIDAYS.get((n.month, n.day))
+    if not cat:
+        if n.day == 1:
+            cat = "month_start"
+        elif (n + timedelta(days=1)).day == 1:
+            cat = "month_end"
+    if cat:
+        return pick_bag(cat, SITUATIONS[cat])
+    return pick_bag("open", OPEN_MESSAGES)
+
+
 def joke_for(n: datetime) -> str:
     cats = ["general"] * 4 + ["tips"]
     wd = n.weekday()
@@ -549,6 +832,29 @@ def maybe_reset_day_counters(n: datetime) -> None:
         RT.praise_n = 0
         RT.midday_praised = set()
         RT.greeted = set()
+        RT.sit_done = set()
+
+
+def money(v) -> str:
+    return f"{int(v):,}".replace(",", " ") if v else ""
+
+
+async def speak_situation(kind: str, key: str, message, extra: str = "", **fmt) -> bool:
+    """Одна реплика на ситуацию; не чаще раза в день на магазин, с лимитами против спама."""
+    n = now()
+    maybe_reset_day_counters(n)
+    k = (kind, key)
+    if k in RT.sit_done or RT.praise_n >= MAX_PRAISE_PER_DAY:
+        return False
+    if time.time() - RT.last_sit < 120 or not can_speak(n, gap=False):
+        return False
+    text = pick_bag(kind, SITUATIONS[kind]).format(**fmt) + extra
+    if await say(text, message):
+        RT.sit_done.add(k)
+        RT.praise_n += 1
+        RT.last_sit = time.time()
+        return True
+    return False
 
 
 async def handle_report(message: Message, store: str, window: str, rep: dict, dt: datetime) -> None:
@@ -557,20 +863,39 @@ async def handle_report(message: Message, store: str, window: str, rep: dict, dt
     if n.hour >= SPEAK_UNTIL[0] and not REACT_AFTER_HOURS:
         return
     await react(message, report_reactions(window, rep["pct"], rep["closed"]))
-
-    # Текстовая похвала: план закрыт уже к обеду
     maybe_reset_day_counters(n)
-    if window == "midday" and (rep["closed"] or (rep["pct"] or 0) >= 100) and store not in RT.midday_praised:
-        if RT.praise_n < MAX_PRAISE_PER_DAY and can_speak(n, gap=False):
-            RT.midday_praised.add(store)
-            bd = biz_date(dt).isoformat()
+
+    pct, fact = rep["pct"], rep["fact"]
+    plan_hit = rep["closed"] or (pct or 0) >= 100
+    p = f" ({pct:.0f}%)" if (pct is not None and not rep["closed"]) else ""
+    fmt = {"store": store, "p": p, "fact": money(fact), "ins": money(rep["ins"])}
+    bd = biz_date(dt).isoformat()
+    sent = False
+
+    if window == "midday":
+        if plan_hit:
             shift = STATE["history"].get(bd, {}).get(store, {}).get("morning", {}).get("shift") or []
-            pct_txt = "" if rep["closed"] and rep["pct"] == 100.0 and not rep["plan"] else f" — {pct_str(rep['pct'])}"
-            text = f"🔥 {store} закрыл план уже к обеду{pct_txt}! Вот это темп 👏"
-            if shift:
-                text += f"\nСмена: {', '.join(shift)} — красавцы!"
-            if await say(text, message):
-                RT.praise_n += 1
+            extra = f"\nСмена: {', '.join(shift)} — красавцы!" if shift else ""
+            sent = await speak_situation("plan_midday", store, message, extra=extra, **fmt)
+        if not sent and (rep["trade"] or 0) >= 2:
+            sent = await speak_situation("trade", store, message, **fmt)
+        if not sent and (fact or 0) >= 40000 and not rep["closed"]:
+            sent = await speak_situation("big", store, message, **fmt)
+        if not sent and (rep["ins"] or 0) >= 1000:
+            sent = await speak_situation("ins", store, message, **fmt)
+        if not sent and rep["plan"] and fact == 0 and not rep["closed"]:
+            sent = await speak_situation("zero", "ALL", message, **fmt)
+    elif window == "evening" and dt.hour < 18 and plan_hit:
+        sent = await speak_situation("early", store, message, **fmt)
+
+    if not sent and rep["late"]:
+        await speak_situation("late", store, message, **fmt)
+
+    # Все ожидаемые точки сдали утро / обед
+    if window in ("morning", "midday"):
+        exp = expected_stores(window, bd)
+        if len(exp) >= 12 and exp <= set(day_entries(bd, window)):
+            await speak_situation("all_" + window, window, None)
 
 
 # ============================ ФОТО-ЧЕКИ ============================
@@ -596,10 +921,48 @@ async def praise_check(message: Message, caption: str) -> None:
         RT.last_praise = time.time()
 
 
+async def diag(message: Message, cmd: str) -> None:
+    """Диагностика: /status, /id и /test (ответом на сообщение с отчётом). Работает в любой группе."""
+    n = now()
+    if cmd == "/test":
+        src = message.reply_to_message
+        t = ((src.text or src.caption or "") if src else "").strip()
+        if not t:
+            await message.reply("Ответьте командой /test на сообщение с отчётом.")
+            return
+        rep = parse_report(t)
+        if not rep:
+            await message.reply("❌ Не распознал это сообщение как отчёт (нужна строка «ТО» и ещё 2 строки отчёта: Смарт, Акс, Серв, Стр, Трейд...).")
+            return
+        who = (src.from_user.full_name if src.from_user else "?")
+        dt = src.date.astimezone(TZ) if src.date else n
+        window = classify_window(dt)
+        pool = report_reactions(window, rep["pct"], rep["closed"])
+        pct = "—" if rep["pct"] is None else f"{rep['pct']:.0f}%"
+        await message.reply(
+            f"✅ Отчёт распознан\nМагазин: {store_name(who)}\nОкно: {window} ({dt.strftime('%H:%M')})\n"
+            f"План: {rep['plan']} | Факт: {rep['fact']} | План закрыт «+»: {rep['closed']} | % = {pct}\n"
+            f"Трейд-ин: {rep['trade']} | Страховки: {rep['ins']} | Поздний: {rep['late']}\n"
+            f"Смена: {', '.join(rep['shift']) or '—'}\nРеакция из набора: {' '.join(pool)}"
+        )
+        return
+    user = message.from_user
+    work = is_allowed_chat(message.chat.id)
+    ignored = bool(user and is_hq(user.full_name or "") and not TEST_MODE)
+    await message.reply(
+        f"🤖 Статус бота\nID этого чата: {message.chat.id}\n"
+        f"Этот чат разрешён (CHAT_ID): {'да' if work else 'НЕТ — добавьте этот ID в CHAT_ID'}\n"
+        f"Ваше имя: {user.full_name if user else '?'} — бот вас {'ИГНОРИРУЕТ (аккаунт головного офиса; включите TEST_MODE=1)' if ignored else 'слушает'}\n"
+        f"Время в Одессе: {n.strftime('%d.%m %H:%M')}\n"
+        f"Писать текстом сейчас можно: {'да' if in_speak_hours(n) else 'нет (тихие часы)'}\n"
+        f"TEST_MODE: {'включён' if TEST_MODE else 'выключен'}"
+    )
+
+
 @dp.message_reaction()
 async def on_reaction(ev: MessageReactionUpdated):
     try:
-        if ev.chat.id != get_chat_id():
+        if not is_allowed_chat(ev.chat.id):
             return
         w = RT.photo_watch.get(ev.message_id)
         if not w or w["done"] or ev.user is None or ev.user.id == w["sender"]:
@@ -671,16 +1034,20 @@ async def process(message: Message, edited: bool) -> None:
     chat = message.chat
     if chat.type not in ("group", "supergroup"):
         return
-    cid = get_chat_id()
-    if cid is None:
-        STATE["chat_id"] = chat.id
-        save_state()
-        cid = chat.id
-        log.info("Рабочий чат запомнен: %s", cid)
-    if chat.id != cid:
-        return
     user = message.from_user
     if user is None or user.is_bot:
+        return
+    head = (message.text or "").strip().lower()
+    if head.startswith("/") and not edited:
+        c = head.split()[0].split("@")[0]
+        if c in ("/status", "/id", "/test"):
+            await diag(message, c)
+            return
+    if not env_chat_ids() and STATE.get("chat_id") is None:
+        STATE["chat_id"] = chat.id
+        save_state()
+        log.info("Рабочий чат запомнен: %s", chat.id)
+    if not is_allowed_chat(chat.id):
         return
 
     name = (user.full_name or "").strip()
@@ -690,7 +1057,7 @@ async def process(message: Message, edited: bool) -> None:
     maybe_reset_day_counters(n)
 
     # Официальный аккаунт головного офиса: бот только "слушает"
-    if is_hq(name):
+    if is_hq(name) and not TEST_MODE:
         if TECH_RE.search(low):
             RT.tech_at = time.time()
             mute_for(45)
@@ -701,6 +1068,13 @@ async def process(message: Message, edited: bool) -> None:
     if not edited:
         RT.last_human = time.time()
         RT.streak = 0
+
+    if FAREWELL_RE.search(low):
+        await react(message, ["🫡", "🤗"])
+        if can_speak(n, gap=False):
+            await say(pick_bag("farewell", SITUATIONS["farewell"]), message)
+        mute_for(30)
+        return
 
     # Серьёзные темы — полная тишина на 3 часа
     if SERIOUS_RE.search(low):
@@ -748,6 +1122,7 @@ async def process(message: Message, edited: bool) -> None:
     # Свет / генератор — деликатная тема, шуток нет
     if POWER_RE.search(low):
         mute_for(60)
+        await react(message, ["🫡"])
         return
 
     # Сбои 1С / связи
@@ -762,11 +1137,6 @@ async def process(message: Message, edited: bool) -> None:
     if TECH_FIXED_RE.search(low) and time.time() - RT.tech_at < 5400:
         RT.mute_until = 0.0
         await react(message, ["👍", "🙏"])
-        return
-
-    if FAREWELL_RE.search(low):
-        await react(message, ["🫡", "🤗"])
-        mute_for(30)
         return
 
     if BDAY_RE.search(low):
@@ -838,7 +1208,7 @@ async def run_slot(kind: str, fallback: bool, n: datetime) -> str:
 
     text, html = None, False
     if kind == "open":
-        text = pick_bag("open", OPEN_MESSAGES)
+        text = open_text(n)
     elif kind == "push":
         text = pick_bag("push", PUSH_MESSAGES)
     elif kind == "nudge_morning":
