@@ -5,8 +5,9 @@ import random
 import re
 import json
 
+import datetime
 from aiogram import Bot, Dispatcher
-from aiogram.types import Message
+from aiogram.types import Message, ReactionTypeEmoji
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from aiohttp import web
 
@@ -20,6 +21,15 @@ if not BOT_TOKEN:
     raise RuntimeError("Не найден BOT_TOKEN. Задайте переменную окружения BOT_TOKEN перед запуском.")
 
 CHAT_ID_FILE = "chat_id.txt"
+
+# Отчёты, собранные за сегодня (сбрасываются в полночь) — только в памяти.
+today_reports = []  # [{"store": str, "percent": float, "time": datetime}]
+
+# "Пульс чата": считаем обычные сообщения (не отчёты), чтобы иногда вставлять реплику.
+chat_pulse_buffer = []  # последние фразы, не являющиеся отчётами
+last_pulse_comment_at = None  # когда бот последний раз комментировал "просто так"
+PULSE_COOLDOWN_MINUTES = 60
+PULSE_TRIGGER_COUNT = 25  # после скольки "обычных" сообщений подряд можно вставить реплику
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -101,6 +111,24 @@ MORNING_JOKES = [
     "☕️ Доброе утро! Сегодня план сам себя не сделает, но кофе точно поможет.",
 ]
 
+# Реакции-эмодзи на отчёт вместо текстового ответа (чтобы не спамить в 13:00)
+HIGH_REACTIONS = ["🔥", "👍", "🎉"]
+MID_REACTIONS = ["💪", "👌"]
+LOW_REACTIONS = ["🤔", "😬"]
+
+# Напоминание за 10 минут до дедлайна отчётов
+PRE_DEADLINE_REMINDERS = [
+    "⏳ 10 минут до обеденных итогов! У кого отчёт ещё не готов — время собраться.",
+    "📢 Через 10 минут сдаём цифры, доставайте калькуляторы!",
+]
+
+# Короткие фразы-реакции "по настроению чата" — используются редко
+PULSE_COMMENTS = [
+    "👀 Чат сегодня живой, наблюдаю.",
+    "☕️ Пока вы спорите, я тут цифры считаю.",
+    "🙂 Движение в чате — хороший знак, значит работаем.",
+]
+
 
 # ======== Обработчик сообщений ========
 @dp.message()
@@ -123,24 +151,55 @@ async def global_handler(message: Message):
         )
         return
 
-    # Отчёт по ТО
+    # Отчёт по ТО — ставим эмодзи-реакцию и запоминаем, но НЕ пишем текстом в чат,
+    # чтобы не спамить, когда все 16 точек присылают отчёты почти одновременно.
     report = parse_report(text)
     if report:
         percent = (report["to_fact"] / report["to_plan"] * 100) if report["to_plan"] else 0
         store = report["store_name"]
+
+        today_reports.append({
+            "store": store,
+            "percent": percent,
+            "time": datetime.datetime.now(),
+        })
+
         if percent >= 100:
-            reply = random.choice(HIGH_RESULT_REPLIES).format(store=store, percent=percent)
+            emoji = random.choice(HIGH_REACTIONS)
         elif percent >= 70:
-            reply = random.choice(MID_RESULT_REPLIES).format(store=store, percent=percent)
+            emoji = random.choice(MID_REACTIONS)
         else:
-            reply = random.choice(LOW_RESULT_REPLIES).format(store=store, percent=percent)
-        await message.reply(reply)
+            emoji = random.choice(LOW_REACTIONS)
+
+        try:
+            await bot.set_message_reaction(
+                chat_id=message.chat.id,
+                message_id=message.message_id,
+                reaction=[ReactionTypeEmoji(emoji=emoji)],
+            )
+        except Exception as e:
+            logging.warning(f"Не удалось поставить реакцию: {e}")
         return
 
-    # Технические сбои
+    # Технические сбои — тут текстом, это нечастое событие и людям нужна поддержка
     if any(trigger in text_low for trigger in OUTAGE_TRIGGERS):
         await message.reply(random.choice(OUTAGE_REPLIES))
         return
+
+    # "Пульс чата": копим обычные сообщения, изредка (не чаще раза в час)
+    # вставляем короткую реплику, если накопилось достаточно активности.
+    global last_pulse_comment_at
+    chat_pulse_buffer.append(text)
+    if len(chat_pulse_buffer) >= PULSE_TRIGGER_COUNT:
+        now = datetime.datetime.now()
+        cooldown_ok = (
+            last_pulse_comment_at is None
+            or (now - last_pulse_comment_at).total_seconds() >= PULSE_COOLDOWN_MINUTES * 60
+        )
+        if cooldown_ok:
+            await message.answer(random.choice(PULSE_COMMENTS))
+            last_pulse_comment_at = now
+        chat_pulse_buffer.clear()
 
 
 # ======== Плановые задачи ========
@@ -150,16 +209,49 @@ async def morning_warmup():
         await bot.send_message(chat_id, random.choice(MORNING_JOKES))
 
 
-async def midday_ping():
+async def pre_deadline_reminder():
     chat_id = get_chat_id()
     if chat_id:
-        await bot.send_message(chat_id, "⏰ Время промежуточных итогов! Кто сегодня идёт в план?")
+        await bot.send_message(chat_id, random.choice(PRE_DEADLINE_REMINDERS))
+
+
+async def post_deadline_summary():
+    """Через ~20 минут после дедлайна — один общий комментарий по итогам,
+    а не реакция на каждый отчёт по отдельности."""
+    chat_id = get_chat_id()
+    if not chat_id or not today_reports:
+        return
+
+    # Берём только отчёты за последние ~40 минут (то есть именно этот заход)
+    cutoff = datetime.datetime.now() - datetime.timedelta(minutes=40)
+    recent = [r for r in today_reports if r["time"] >= cutoff]
+    if not recent:
+        return
+
+    best = max(recent, key=lambda r: r["percent"])
+    worst = min(recent, key=lambda r: r["percent"])
+
+    text = f"📊 Промежуточные итоги: {len(recent)} точек отчитались.\n"
+    text += f"👑 Впереди всех — {best['store']} ({best['percent']:.0f}%).\n"
+    if worst["percent"] < 70 and worst["store"] != best["store"]:
+        text += f"🙃 {worst['store']} пока догоняет ({worst['percent']:.0f}%), но день длинный."
+
+    await bot.send_message(chat_id, text)
+
+
+async def reset_daily_reports():
+    today_reports.clear()
 
 
 def setup_scheduler():
     scheduler = AsyncIOScheduler(timezone="Europe/Kiev")
     scheduler.add_job(morning_warmup, trigger="cron", hour=9, minute=30)
-    scheduler.add_job(midday_ping, trigger="cron", hour=13, minute=0)
+    # За 10 минут до обеденного дедлайна (считаем дедлайн 13:00)
+    scheduler.add_job(pre_deadline_reminder, trigger="cron", hour=12, minute=50)
+    # Через 20 минут после дедлайна — один общий комментарий по итогам
+    scheduler.add_job(post_deadline_summary, trigger="cron", hour=13, minute=20)
+    # Сброс собранных отчётов в полночь
+    scheduler.add_job(reset_daily_reports, trigger="cron", hour=0, minute=0)
     scheduler.start()
 
 
