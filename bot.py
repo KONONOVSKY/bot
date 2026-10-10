@@ -221,10 +221,18 @@ dp = Dispatcher()
 
 # ============================ РАЗБОР ОТЧЁТОВ ============================
 _SPACE_DIGITS = re.compile(r"(?<=\d)[ \u00a0\u202f](?=\d{3}(?!\d))")
-TO_LINE = re.compile(
-    r"^\W*(?:план\s+)?т?о(?![A-Za-zА-Яа-яЁё])(?!\s*(?:в\s+)?кредит)\s*(?:план\w*)?\s*[:\-–]?\s*(?P<rest>.*)$",
-    re.IGNORECASE,
-)
+
+# Универсальные регулярные выражения для категорий
+CAT_PATTERNS = {
+    "to": re.compile(r"^\W*(?:план\s+)?т?о(?![A-Za-zА-Яа-яЁё])(?!\s*(?:в\s+)?кредит)\s*(?:план\w*)?\s*[:\-–]?\s*(?P<rest>.*)$", re.IGNORECASE),
+    "smart": re.compile(r"^\W*(?:смарт|тел|смарты)\b\s*[:\-–]?\s*(?P<rest>.*)$", re.IGNORECASE),
+    "serv": re.compile(r"^\W*(?:серв|су|сервис)\b\s*[:\-–]?\s*(?P<rest>.*)$", re.IGNORECASE),
+    "aks": re.compile(r"^\W*(?:акс|аксы)\b\s*[:\-–]?\s*(?P<rest>.*)$", re.IGNORECASE),
+    "str": re.compile(r"^\W*(?:стр|страх|стрх)\b\s*[:\-–]?\s*(?P<rest>.*)$", re.IGNORECASE),
+    "trade": re.compile(r"^\W*(?:трейд|trade)\b\s*(?:ин)?\s*[:\-–]?\s*(?P<rest>.*)$", re.IGNORECASE),
+    "credit": re.compile(r"^\W*(?:кредит|крдт|то\s+кредит)\b\s*[:\-–]?\s*(?P<rest>.*)$", re.IGNORECASE),
+}
+
 MARKER_RE = re.compile(
     r"^\W*(?:[cс]март|тел|сер|[cс]у\b|ак[cс]|стр|трейд|trade|заявк|крдт|кредит|"
     r"(?:завтра\s+)?на\s+(?:смене|зміні|змене))",
@@ -260,54 +268,108 @@ def calc_pct(plan, fact, closed):
     return None
 
 
-def _cat_fact(lines: list, pattern: str):
-    for l in lines:
-        if re.match(pattern, l, re.IGNORECASE):
-            nums = [int(x) for x in re.findall(r"\d+", l)]
-            if ("+" in l or re.search(r"закр[иы]т", l, re.IGNORECASE)) and nums:
-                return nums[-1]
-            if len(nums) >= 2:
-                return nums[1]
-            if len(nums) == 1:
-                return nums[0]
-            return None
-    return None
+def _extract_nums_from_rest(rest: str):
+    closed = "+" in rest or bool(re.search(r"закр[иы]т", rest, re.IGNORECASE))
+    nums = [int(x) for x in re.findall(r"\d+", rest.replace(" ", ""))]
+    return nums, closed
 
 
 def parse_report(text: str):
-    """Возвращает dict(plan, fact, closed, pct, shift, tomorrow) или None."""
+    """Улучшенный парсер отчётов, понимающий форматы план/факт и слэши."""
     if not text or len(text) > 1800:
         return None
     t = _clean(text)
     lines = [l.strip() for l in t.split("\n") if l.strip()]
-    to = None
-    for l in lines:
-        m = TO_LINE.match(l)
-        if not m:
-            continue
-        rest = m.group("rest")
-        closed = "+" in rest or bool(re.search(r"закр[иы]т", rest, re.IGNORECASE))
-        nums = [int(x) for x in re.findall(r"\d+", rest)]
-        if closed:
-            to = (None, nums[-1] if nums else None, True)
-        else:
-            if not nums:
-                continue
-            to = (nums[0], nums[1] if len(nums) > 1 else None, False)
-        break
-    if not to:
-        return None
-    if sum(1 for l in lines if MARKER_RE.match(l)) < 2:
-        return None
-    plan, fact, closed = to
-    shift, tomorrow = parse_shift(t)
     
-    return {
-        "plan": plan, "fact": fact, "closed": closed,
-        "pct": calc_pct(plan, fact, closed), "shift": shift, "tomorrow": tomorrow,
-        "trade": _cat_fact(lines, r"^\W*(?:трейд|trade)"),
-        "ins": _cat_fact(lines, r"^\W*(?:стр|страх)")
+    data = {
+        "plan": None, "fact": None, "closed": False, "pct": None,
+        "shift": [], "tomorrow": False,
+        "smart": {"plan": None, "fact": None},
+        "serv": {"plan": None, "fact": None},
+        "aks": {"plan": None, "fact": None},
+        "trade": None, "ins": None, "credit": None
     }
+    
+    found_to = False
+    for l in lines:
+        # Проверяем ТО (Общий план/факт)
+        m_to = CAT_PATTERNS["to"].match(l)
+        if m_to:
+            rest = m_to.group("rest")
+            nums, closed = _extract_nums_from_rest(rest)
+            if closed:
+                data["fact"] = nums[-1] if nums else None
+                data["closed"] = True
+            elif len(nums) >= 2:
+                data["plan"], data["fact"] = nums[0], nums[1]
+            elif len(nums) == 1:
+                data["fact"] = nums[0]
+            found_to = True
+            continue
+
+        # Проверяем Смартфоны
+        m_smart = CAT_PATTERNS["smart"].match(l)
+        if m_smart:
+            nums, _ = _extract_nums_from_rest(m_smart.group("rest"))
+            if len(nums) >= 2:
+                data["smart"]["plan"], data["smart"]["fact"] = nums[0], nums[1]
+            elif len(nums) == 1:
+                data["smart"]["fact"] = nums[0]
+            continue
+
+        # Проверяем Сервисные услуги
+        m_serv = CAT_PATTERNS["serv"].match(l)
+        if m_serv:
+            nums, _ = _extract_nums_from_rest(m_serv.group("rest"))
+            if len(nums) >= 2:
+                data["serv"]["plan"], data["serv"]["fact"] = nums[0], nums[1]
+            elif len(nums) == 1:
+                data["serv"]["fact"] = nums[0]
+            continue
+
+        # Проверяем Аксессуары
+        m_aks = CAT_PATTERNS["aks"].match(l)
+        if m_aks:
+            nums, _ = _extract_nums_from_rest(m_aks.group("rest"))
+            if len(nums) >= 2:
+                data["aks"]["plan"], data["aks"]["fact"] = nums[0], nums[1]
+            elif len(nums) == 1:
+                data["aks"]["fact"] = nums[0]
+            continue
+
+        # Страховка
+        m_str = CAT_PATTERNS["str"].match(l)
+        if m_str:
+            nums, _ = _extract_nums_from_rest(m_str.group("rest"))
+            if nums:
+                data["ins"] = nums[-1]
+            continue
+
+        # Трейд-ин
+        m_tr = CAT_PATTERNS["trade"].match(l)
+        if m_tr:
+            nums, _ = _extract_nums_from_rest(m_tr.group("rest"))
+            if nums:
+                data["trade"] = nums[-1]
+            continue
+
+        # Кредит
+        m_cr = CAT_PATTERNS["credit"].match(l)
+        if m_cr:
+            nums, _ = _extract_nums_from_rest(m_cr.group("rest"))
+            if nums:
+                data["credit"] = nums[-1]
+            continue
+
+    if not found_to:
+        return None
+
+    data["pct"] = calc_pct(data["plan"], data["fact"], data["closed"])
+    shift, tomorrow = parse_shift(t)
+    data["shift"] = shift
+    data["tomorrow"] = tomorrow
+    
+    return data
 
 
 def _norm_name(name: str) -> str:
@@ -1020,6 +1082,8 @@ def report_reactions(window: str, pct, closed: bool) -> list:
     if pct is None:
         return ["👍"]
     if window == "midday":
+        if pct >= 80:
+            return ["🔥", "👍", "⚡"]
         if pct >= 50:
             return ["🔥", "😎", "👏"]
         if pct >= 25:
@@ -1028,8 +1092,8 @@ def report_reactions(window: str, pct, closed: bool) -> list:
     if pct >= 70:
         return ["👍", "🤝", "👌", "⚡"]
     if pct >= 40:
-        return ["👀", "🤨", "🫡"]
-    return ["🤡", "🙈", "🥱"]
+        return ["👀", "🫡", "🤝"]
+    return ["👍", "🤝"]
 
 
 def maybe_reset_day_counters(n: datetime) -> None:
