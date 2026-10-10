@@ -116,7 +116,10 @@ POSITIVE = {"👍", "🔥", "❤", "🎉", "🤩", "😎", "👏", "💯", "⚡"
 
 # ============================ ВРЕМЯ ============================
 def now() -> datetime:
-    return datetime.now(TZ)
+    dt = datetime.now(TZ)
+    if TEST_MODE:
+        return dt.replace(hour=16, minute=0, second=0, microsecond=0)
+    return dt
 
 
 def biz_date(dt: datetime) -> date:
@@ -296,12 +299,12 @@ def parse_report(text: str):
         return None
     plan, fact, closed = to
     shift, tomorrow = parse_shift(t)
+    
     return {
         "plan": plan, "fact": fact, "closed": closed,
         "pct": calc_pct(plan, fact, closed), "shift": shift, "tomorrow": tomorrow,
         "trade": _cat_fact(lines, r"^\W*(?:трейд|trade)"),
-        "ins": _cat_fact(lines, r"^\W*(?:стр|страх)"),
-        "late": bool(re.search(r"поздн|опозд|извин|вибач", t, re.IGNORECASE)),
+        "ins": _cat_fact(lines, r"^\W*(?:стр|страх)")
     }
 
 
@@ -769,18 +772,18 @@ SITUATIONS = {
         "🥳 {store} сегодня задает ритм всему филиалу{p}!",
         "🌟 Пока остальные допродают, {store} уже отдыхает с выполненным планом{p}!"
     ],
-    # извинение за поздний отчёт
+    # извинение за поздний отчёт / задержка
     "late": [
-        "😉 Главное, что цифры дошли. Без паники, работаем.",
-        "🤝 Принято! Поздно — лучше, чем никогда.",
-        "☕ Всё ок, отчёт в базе. Спасибо, что не забыли.",
-        "🙂 Бывает, запара у всех. Отчёт зафиксирован!",
-        "👌 Принято! Рабочие моменты, всё понимаем.",
-        "🫡 Миссия выполнена, отчёт у меня. Спасибо!",
-        "😌 Без проблем, цифры на месте. Отдыхайте!",
-        "💪 Запара на точке — это святое. Отчёт принят!",
-        "🤗 Всё хорошо, главное, что закрыли вопрос.",
-        "✅ Принято. Спасибо за апдейт!"
+        "😉 Главное, что цифры дошли и в такое время.",
+        "🤝 Отчет принят! Чуть с опозданием, но главное результат.",
+        "⏳ Цифры в базе. Запоздали, но бывает!",
+        "☕ Принято. Главное, что не забыли отправить!",
+        "🙂 Зафиксировал. Лучше поздно, чем никогда!",
+        "🫡 Отчет получен! Время не идеальное, но цифры на месте.",
+        "👌 Принято! Рабочие моменты, время прощаем.",
+        "💪 Опоздание засчитано, но главное — цифры в кассе!",
+        "🤗 Всё хорошо, отчет у меня, хоть и с задержкой.",
+        "✅ Есть контакт! По времени чуть выбились, но работаем."
     ],
     # коллега прощается с работой
     "farewell": [
@@ -1065,27 +1068,40 @@ async def handle_report(message: Message, store: str, window: str, rep: dict, dt
     pct, fact = rep["pct"], rep["fact"]
     plan_hit = rep["closed"] or (pct or 0) >= 100
     p = f" ({pct:.0f}%)" if (pct is not None and not rep["closed"]) else ""
-    fmt = {"store": store, "p": p, "fact": money(fact), "ins": money(rep["ins"])}
+    fmt = {"store": store, "p": p, "fact": money(fact), "ins": money(rep.get("ins"))}
     bd = biz_date(dt).isoformat()
     sent = False
+
+    # Отчеты до 8:00 игнорируем для текстовых комментариев
+    if dt.hour < 8:
+        sent = True 
 
     if window == "midday":
         if plan_hit:
             shift = STATE["history"].get(bd, {}).get(store, {}).get("morning", {}).get("shift") or []
             extra = f"\nСмена: {', '.join(shift)} — красавцы!" if shift else ""
             sent = await speak_situation("plan_midday", store, message, extra=extra, **fmt)
-        if not sent and (rep["trade"] or 0) >= 2:
+        if not sent and (rep.get("trade") or 0) >= 2:
             sent = await speak_situation("trade", store, message, **fmt)
         if not sent and (fact or 0) >= 40000 and not rep["closed"]:
             sent = await speak_situation("big", store, message, **fmt)
-        if not sent and (rep["ins"] or 0) >= 1000:
+        if not sent and (rep.get("ins") or 0) >= 1000:
             sent = await speak_situation("ins", store, message, **fmt)
         if not sent and rep["plan"] and fact == 0 and not rep["closed"]:
             sent = await speak_situation("zero", "ALL", message, **fmt)
     elif window == "evening" and dt.hour < 18 and plan_hit:
         sent = await speak_situation("early", store, message, **fmt)
 
-    if not sent and rep["late"]:
+    # Новая временная логика опозданий
+    is_late = False
+    minutes = dt.hour * 60 + dt.minute
+    
+    if window == "morning" and minutes > (8 * 60 + 55): # После 08:55
+        is_late = True
+    elif window == "midday" and (14 * 60) < minutes <= (16 * 60): # С 14:01 до 16:00
+        is_late = True
+
+    if not sent and is_late:
         await speak_situation("late", store, message, **fmt)
 
     # Все ожидаемые точки сдали утро / обед
@@ -1132,15 +1148,24 @@ async def diag(message: Message, cmd: str) -> None:
             await message.reply("❌ Не распознал это сообщение как отчёт (нужна строка «ТО» и ещё 2 строки отчёта: Смарт, Акс, Серв, Стр, Трейд...).")
             return
         who = (src.from_user.full_name if src.from_user else "?")
-        dt = src.date.astimezone(TZ) if src.date else n
+        dt = n if TEST_MODE else (src.date.astimezone(TZ) if src.date else n)
         window = classify_window(dt)
         pool = report_reactions(window, rep["pct"], rep["closed"])
         pct = "—" if rep["pct"] is None else f"{rep['pct']:.0f}%"
+
+        # Считаем опоздание для диагностики
+        is_late = False
+        minutes = dt.hour * 60 + dt.minute
+        if window == "morning" and minutes > (8 * 60 + 55):
+            is_late = True
+        elif window == "midday" and (14 * 60) < minutes <= (16 * 60):
+            is_late = True
+
         await message.reply(
             f"✅ Отчёт распознан\nМагазин: {store_name(who)}\nОкно: {window} ({dt.strftime('%H:%M')})\n"
             f"План: {rep['plan']} | Факт: {rep['fact']} | План закрыт «+»: {rep['closed']} | % = {pct}\n"
-            f"Трейд-ин: {rep['trade']} | Страховки: {rep['ins']} | Поздний: {rep['late']}\n"
-            f"Смена: {', '.join(rep['shift']) or '—'}\nРеакция из набора: {' '.join(pool)}"
+            f"Трейд-ин: {rep.get('trade')} | Страховки: {rep.get('ins')} | Поздний: {is_late}\n"
+            f"Смена: {', '.join(rep.get('shift', [])) or '—'}\nРеакция из набора: {' '.join(pool)}"
         )
         return
     user = message.from_user
@@ -1150,7 +1175,7 @@ async def diag(message: Message, cmd: str) -> None:
         f"🤖 Статус бота\nID этого чата: {message.chat.id}\n"
         f"Этот чат разрешён (CHAT_ID): {'да' if work else 'НЕТ — добавьте этот ID в CHAT_ID'}\n"
         f"Ваше имя: {user.full_name if user else '?'} — бот вас {'ИГНОРИРУЕТ (аккаунт головного офиса; включите TEST_MODE=1)' if ignored else 'слушает'}\n"
-        f"Время в Одессе: {n.strftime('%d.%m %H:%M')}\n"
+        f"Время бота (с учётом TEST_MODE): {n.strftime('%d.%m %H:%M')}\n"
         f"Писать текстом сейчас можно: {'да' if in_speak_hours(n) else 'нет (тихие часы)'}\n"
         f"TEST_MODE: {'включён' if TEST_MODE else 'выключен'}"
     )
@@ -1290,7 +1315,8 @@ async def process(message: Message, edited: bool) -> None:
         rep = parse_report(text)
         if rep:
             store = store_name(name, user.id, text)
-            dt = message.date.astimezone(TZ) if message.date else n
+            # В TEST_MODE игнорируем время сообщения и берем замороженные 16:00 из now()
+            dt = n if TEST_MODE else (message.date.astimezone(TZ) if message.date else n)
             window = classify_window(dt)
             record_report(store, window, dt, rep)
             save_state()
@@ -1396,7 +1422,7 @@ async def on_edited(message: Message):
 # ============================ РАСПИСАНИЕ ============================
 # (id, час, минута, тип, fallback_на_шутку)
 SLOTS = [
-    ("open", 7, 55, "open", False),
+    ("open", 9, 0, "open", False),
     ("nudge_m", 8, 55, "nudge_morning", False),
     ("sum", 9, 30, "summary", True),
     ("j10", 10, 20, "joke", False),
