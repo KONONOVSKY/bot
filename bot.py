@@ -15,6 +15,7 @@ TOP TEAM - рабочий бот для чата 16 магазинов (Сота
   * утром пишет итоги вчерашнего дня, по понедельникам - итоги недели
   * НИЧЕГО не пишет текстом после 18:00 (реакции на вечерние отчёты - включены)
   * молчит, когда в чате авария (1С, свет) или серьёзные темы (сборы, прощания)
+  * имеет админ-панель в ЛС для Создателей и отшивает остальных сотрудников.
 
 Запуск: python bot.py   (нужны переменные BOT_TOKEN и желательно CHAT_ID)
 """
@@ -34,7 +35,7 @@ from zoneinfo import ZoneInfo
 
 from aiogram import Bot, Dispatcher
 from aiogram.exceptions import TelegramRetryAfter
-from aiogram.types import Message, MessageReactionUpdated, ReactionTypeEmoji
+from aiogram.types import Message, MessageReactionUpdated, ReactionTypeEmoji, BufferedInputFile
 from aiohttp import web
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -1289,7 +1290,87 @@ async def handle_command(message: Message, cmd: str) -> None:
         await say("📈 Пока мало отчётов за сегодня - подожду остальных.", message)
 
 
-# ============================ ГЛАВНЫЙ ОБРАБОТЧИК ============================
+# ============================ ОБРАБОТЧИК ЛИЧНЫХ СООБЩЕНИЙ ============================
+async def handle_private_message(message: Message) -> None:
+    user = message.from_user
+    
+    # Проверяем, что пишет админ (Создатель)
+    if not user or user.id not in HQ_USER_IDS:
+        # Если пишет обычный сотрудник — выдаем случайную шутку-отмазку из пула bot_mention
+        reply_text = pick_bag("bot_mention", SITUATIONS["bot_mention"])
+        await message.reply(reply_text)
+        return
+
+    # Ниже идет логика ТОЛЬКО для Создателя
+    text = (message.text or "").strip()
+    low = text.lower()
+    
+    if low in ("/start", "/help"):
+        await message.reply(
+            "👑 <b>Панель управления (Создатель)</b>\n\n"
+            "🕹 <b>Доступные команды:</b>\n"
+            "<code>/stats</code> — статистика отчётов за сегодня\n"
+            "<code>/say текст</code> — отправить сообщение в чат от имени бота\n"
+            "<code>/joke</code> — принудительно отправить шутку прямо сейчас\n"
+            "<code>/mute 120</code> — запретить боту писать на N минут (без цифры = 60)\n"
+            "<code>/unmute</code> — снять режим тишины\n"
+            "<code>/state</code> — скачать базу (state.json)",
+            parse_mode="HTML"
+        )
+    elif low == "/stats":
+        bd = biz_date(now()).isoformat()
+        ent_m = day_entries(bd, "morning")
+        ent_d = day_entries(bd, "midday")
+        ent_e = day_entries(bd, "evening")
+        
+        mute_status = "Выключен"
+        if RT.mute_until > time.time():
+            mute_status = datetime.fromtimestamp(RT.mute_until, TZ).strftime('%H:%M:%S')
+            
+        await message.reply(
+            f"📊 <b>Статистика за сегодня ({bd}):</b>\n"
+            f"🌅 Утро: {len(ent_m)} отчётов\n"
+            f"☀️ Обед: {len(ent_d)} отчётов\n"
+            f"🌙 Вечер: {len(ent_e)} отчётов\n\n"
+            f"🔇 Режим тишины активен до: {mute_status}",
+            parse_mode="HTML"
+        )
+    elif low.startswith("/say "):
+        cid = get_chat_id()
+        if not cid:
+            await message.reply("❌ Не могу отправить: ID рабочего чата не задан.")
+            return
+        msg_to_send = text.replace("/say ", "", 1)
+        await bot.send_message(cid, msg_to_send)
+        await message.reply("✅ Отправлено в рабочий чат.")
+    elif low == "/joke":
+        cid = get_chat_id()
+        if not cid:
+            await message.reply("❌ ID рабочего чата не задан.")
+            return
+        joke = joke_for(now())
+        await bot.send_message(cid, joke)
+        await message.reply(f"✅ Шутка отправлена в чат:\n<i>{joke}</i>", parse_mode="HTML")
+    elif low.startswith("/mute"):
+        parts = text.split()
+        minutes = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 60
+        mute_for(minutes)
+        await message.reply(f"🔇 Бот замолк на {minutes} минут.")
+    elif low == "/unmute":
+        RT.mute_until = 0.0
+        await message.reply("🔊 Режим тишины снят. Бот снова может шутить и комментировать.")
+    elif low == "/state":
+        try:
+            state_str = json.dumps(STATE, ensure_ascii=False, indent=2)
+            file = BufferedInputFile(state_str.encode('utf-8'), filename="state.json")
+            await message.reply_document(file, caption="Актуальный слепок базы данных")
+        except Exception as e:
+            await message.reply(f"❌ Ошибка выгрузки: {e}")
+    else:
+        await message.reply("Неизвестная команда. Нажмите /help")
+
+
+# ============================ ГЛАВНЫЙ ОБРАБОТЧИК (ЧАТЫ) ============================
 async def process(message: Message, edited: bool) -> None:
     chat = message.chat
     if chat.type not in ("group", "supergroup"):
@@ -1448,7 +1529,11 @@ async def process(message: Message, edited: bool) -> None:
 @dp.message()
 async def on_message(message: Message):
     try:
-        await process(message, edited=False)
+        # Если пишут в личку - отправляем в обработчик ЛС
+        if message.chat.type == "private":
+            await handle_private_message(message)
+        else:
+            await process(message, edited=False)
     except Exception:
         log.exception("Ошибка обработки сообщения")
 
@@ -1456,7 +1541,9 @@ async def on_message(message: Message):
 @dp.edited_message()
 async def on_edited(message: Message):
     try:
-        await process(message, edited=True)
+        # Отредактированные сообщения в личке пока игнорируем
+        if message.chat.type != "private":
+            await process(message, edited=True)
     except Exception:
         log.exception("Ошибка обработки правки")
 
