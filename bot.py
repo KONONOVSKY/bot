@@ -1334,10 +1334,12 @@ async def process(message: Message, edited: bool) -> None:
     if edited:
         return
 
-    # Фото-чеки: от руководителей — сразу (кроме "туда же"), от остальных — ждем лайков (2 шт)
+    # Фото-чеки: если есть текст или одиночный положительный эмодзи
     if message.photo and len(text) < 120:
-        # Если босс прислал чек без фразы "туда же", хвалим сразу. В остальных случаях ждем 2 реакции.
-        if is_boss(name, user.id) and not re.search(r"туда\s*же", low):
+        has_positive_emoji = text in POSITIVE or bool(set(text) & POSITIVE)
+        
+        # Если прислал босс (не "туда же") ИЛИ на фото стоит положительный эмодзи/есть ключевые слова — хвалим сразу
+        if (is_boss(name, user.id) and not re.search(r"туда\s*же", low)) or has_positive_emoji:
             await praise_check(message, text)
         else:
             RT.photo_watch[message.message_id] = {
