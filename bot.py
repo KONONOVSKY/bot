@@ -13,9 +13,17 @@ TOP TEAM - рабочий бот для чата 16 магазинов (Сота
   * ведет подсчет Кармы точек за лайки на фото-чеках (команда /karma)
   * напоминает, кто ещё не сдал утренний/обеденный отчёт
   * утром пишет итоги вчерашнего дня, по понедельникам - итоги недели
-  * НИЧЕГО не пишет текстом после 18:00 (реакции на вечерние отчёты - включены)
+  * пишет текстом до 19:00; вечерние отчёты и напоминания учитываются до закрытия магазинов
   * молчит, когда в чате авария (1С, свет) или серьёзные темы (сборы, прощания)
   * имеет админ-панель в ЛС для Создателей и отшивает остальных сотрудников.
+
+Правила для руководителей и шуток (добавлено):
+  * шутки и советы бот пишет ТОЛЬКО после сдачи всех отчётов текущего окна; если отчёты задерживаются,
+    сначала напоминает отстающим (утро, обед и вечер), а затем ждёт фактической сдачи
+  * руководителям (HQ_USER_IDS + BOSS_USER_IDS) бот НИКОГДА не отвечает шутками - только положительные реакции
+  * SILENT_USER_IDS (ᴋɴɴᴠsᴋʏ) - вообще никаких текстовых ответов, даже на фото, только реакции
+  * фото руководителя с похвалой (кредит/гарантия/флагман или положительные эмодзи) = чек сотрудника:
+    после 2 реакций коллег бот хвалит ПРОДАВЦА (а не руководителя)
 
 Запуск: python bot.py   (нужны переменные BOT_TOKEN и желательно CHAT_ID)
 """
@@ -56,8 +64,8 @@ except Exception:  # старые базы часовых поясов
     TZ = ZoneInfo("Europe/Kiev")
 
 SPEAK_FROM = (7, 30)     # раньше этого времени бот не пишет текстом
-SPEAK_UNTIL = (18, 0)    # С 18:00 бот НЕ пишет текстом (жёсткое правило)
-REACT_AFTER_HOURS = True  # реакции-эмодзи на вечерние отчёты (после 18:00) - тихие, без текста
+SPEAK_UNTIL = (19, 0)    # После 19:00 бот не пишет текстом; вечерние отчёты могут приходить до этого времени
+REACT_AFTER_HOURS = True  # реакции на вечерние отчёты сохраняются; текст разрешён до 19:00
 MIN_GAP_MIN = 20          # минимум минут между самостоятельными сообщениями бота
 SELF_SPAM_LIMIT = 4       # сколько сообщений бота подряд без ответа людей, потом пауза
 HUMAN_BURST_SEC = 75      # если люди только что писали - не перебиваем
@@ -70,6 +78,13 @@ HQ_USER_IDS = {486540367, 987578033}
 BOSS_USER_IDS = {394259493}
 HQ_MARKERS = ("ᴋɴɴᴠsᴋʏ", "knnvsky")
 BOSS_MARKERS = ("гусев", "стелла яссин")
+
+# Полная тишина: этому человеку бот НИКОГДА ничего не пишет текстом (даже на фото), только реакции.
+SILENT_USER_IDS = {486540367}
+# Положительные реакции, которые бот ставит на сообщения руководителей
+MANAGER_REACTIONS = ["👍", "🔥", "😎", "💯", "🏆", "❤", "🎉"]
+# Шутки/советы разрешены только когда все отчёты уже сданы. До этого времени проверяем утренние, после - обеденные.
+GATE_MIDDAY_FROM = (13, 30)
 
 # 16 магазинных аккаунтов, обнаруженных в истории чата. ID устойчивее имён.
 STORE_BY_USER_ID = {
@@ -393,6 +408,19 @@ def is_boss(name: str, user_id: int | None = None) -> bool:
     return any(_norm_name(k) in low for k in BOSS_MARKERS)
 
 
+def is_manager(name: str, user_id: int | None = None) -> bool:
+    """Руководитель = любой из HQ_USER_IDS / BOSS_USER_IDS (или по имени). Им бот не шутит."""
+    return is_hq(name, user_id) or is_boss(name, user_id)
+
+
+def is_silent(name: str, user_id: int | None = None) -> bool:
+    """Тот, кому бот вообще ничего не отвечает текстом (только положительные реакции)."""
+    if user_id is not None and user_id in SILENT_USER_IDS:
+        return True
+    low = _norm_name(name)
+    return any(_norm_name(k) in low for k in HQ_MARKERS)
+
+
 def store_name(name: str, user_id: int | None = None, report_text: str = "") -> str:
     if user_id is not None:
         if user_id in STORE_BY_USER_ID:
@@ -571,8 +599,8 @@ JOKES = {
         "🧮 Продавец - это когда ты гуманитарий, но рассрочку на 10 платежей с учетом допов считаешь в уме быстрее калькулятора.",
         "🤝 Тот самый момент, когда закрыл сложного клиента на флагман со всеми допами. Ощущение, будто где-то на фоне одобрительно кивнул Денис Гусев.",
         "🥇 Объясняешь разницу между Type-C и Lightning в тысячный раз за месяц. Стелла гордилась бы твоим терпением, но внутри ты уже давно dead inside",
-        "✨ Слышали ситуацию? Стажёр при Денисе Гусеве закрытые вопросы задавал в прошлую пятницу, больше этого стажёра никто не видел, многие переживают, но на хабе инфа - стажировка закрыта успешно🤔.",
-        "🤝 Клиент внезапно включает режим «волка с Уолл-стрит» и торгуется за 100 гривен, а в чеке сервиса уже на 4000,",
+        "✨ Слышали ситуацию? Стажёр при Денисе Гусеве закрытые вопросы задавал в прошлую пятницу, больше этого стажёра никто не видел, многие переживают. На хабе инфа - стажировка закрыта успешно🤔.",
+        "🤝 Клиент внезапно включает режим «волка с Уолл-стрит» и торгуется за 100 гривен, а в чеке сервиса уже на 4200,",
         "🎯 Пришел просто за кабелем - ушел с флагманом в рассрочку - чисто тема ОФ2.",
         "🎯Покупатель уверен, что 13-й айфон с разбитым в крошку экраном по трейд-ину покроет 90% стоимости нового. Стелла Максимовна учила нас эмпатии, так что просто киваем и мягко возвращаем его в реальность, и принимаем его телефон как первый взнос в оплату частями",
         "📱 Закон подлости: твой личный телефон разрывается от звонков ровно в тот момент, когда ты закрываешь сделку на 50к.",
@@ -582,10 +610,10 @@ JOKES = {
         "🛍 Идеальная продажа - это когда клиент уходит с ощущением, что он сам всё решил, а ты просто вовремя пробивал чек.",
         "😎 В мире полно консультантов, которые просто выдают товар со склада. А вы тут занимаетесь ювелирной настройкой за 4200 и даже на склад не ходите😂",
         "📶 Ты можешь забыть количество мегапикселей в ширике, но Денис Гусев ментально заставит тебя вспомнить, почему именно этот смартфон нужно продать в кредит прямо сейчас.",
-        "🧠 Когда 1С висит на оплате терминалом уже третью минуту, а клиент смотрит тебе прямо в душу. В этот момент важно вспомнить слова Стеллы и продолжать разсширять чек.",
+        "🧠 Когда 1С висит на оплате терминалом уже третью минуту, а клиент смотрит тебе прямо в душу. В этот момент важно вспомнить слова Стеллы, претвориться NPC, но продолжать разсширять чек в 1С.",
         "🫡 Уважение тем, кто после фразы «я подумаю» всё равно остаётся максимально вежливым.",
         "📦 На витрине всё спокойно, пока не приходит переоценка.",
-        "😎 Клиент сказал «мне только телефон», но через 10 минут уходит с наушниками, страховкой и защитой. Это не магия, это Денис Гусев во сне пришел и подсказал правильный скрипт.",
+        "😎 Клиент сказал «мне только телефон», но через 10 минут уходит с наушниками, страховкой и защитой. Это не магия, это Гусев во сне пришел и подсказал правильный скрипт.",
         "🔋 У продавца батарея 12%, но консультация всё ещё в режиме Ultra.",
         "📲 «А зарядка в комплекте?» - вопрос, который заставляет её оттуда убрать",
         "😎 Не каждый герой носит плащ, но некоторые умеют перенести контакты за 4000.",
@@ -735,6 +763,123 @@ PRAISE_EXTRA = [
     "🫡 Этот доп заслуживает отдельного лайка. Слей!",
     "🚀 Sheesh! Вот это я понимаю - допродали так допродали 🏆"
 ]
+
+# ---- Похвала ПРОДАВЦУ за чек, который в чат прислал руководитель.
+# Обращение всегда к продавцу ({to} - дательный падеж, {To} - то же с большой буквы).
+# Руководителю в тексте ничего не адресуется.
+PRAISE_SELLER = {
+    "default": [
+        "🔥 Чиназес!",
+        "😎 Красивый мув: продавец этого чека сегодня явно поймал волну.",
+        "🚀 Чек залетел как надо. Автору продажи +100 к скиллу и уважение команды.",
+        "💯 Без лишнего шума, просто сильная продажа. Плюс продавцу этого чека.",
+        "🏆 Этот результат говорит сам за себя. Продавцу — заслуженный хайп в чат.",
+        "✨ Когда консультация превращается в такой чек — это уже мастерство. Красиво!",
+        "📈 Плюс один сильный эпизод в копилку ОФ2. Автору продажи — красава!",
+        "🫡 Вот это уровень исполнения!",
+    ],
+    "credit": [
+        "💳 Кредитный чек на месте — продавцу плюс за грамотную презентацию решения.",
+        "🔥 Оплата частями оформлена красиво. Автор продажи, это был сильный ход.",
+        "🚀 Кредит в чеке — цифры получили буст. Продавцу заслуженный хайп.",
+        "😎 Сильная работа с потребностью клиента. Кредитный чек выглядит уверенно.",
+        "💯 Не просто консультация, а точное попадание в запрос. Хайпим продавцу этого чека.",
+        "📈 Вот так и собираются результаты: грамотный диалог и кредит в чеке. Красиво!",
+    ],
+    "warranty": [
+        "🛡️ Защита в чеке — грамотный апгрейд сервиса.",
+        "🔥 Страховка добавлена по делу — сильная работа с ценностью для клиента.",
+        "💯 Не формальность, а продуманное решение. Автору продажи — уважение.",
+        "🚀 Чек стал сильнее, клиент получил дополнительную защиту. Красивый мув!",
+        "😎 Гарантия/страховка в чеке — значит, ценность донесли правильно. Салам продавцу.",
+    ],
+    "flagship": [
+        "📱 Флагман в чеке — это уже заявка на хайлайт дня.",
+        "🔥 Премиум-запрос закрыт уверенно. Автор продажи, это сильно.",
+        "🏆 Флагман оформлен — уровень консультации говорит сам за себя.",
+        "🚀 Вот это попадание в запрос клиента. Продавцу — заслуженный хайп.",
+        "😎 Большая покупка, уверенная работа. Красиво отработано!",
+    ],
+    "extra": [
+        "🔥 Доп в чеке - Чиназес.",
+        "😎 Ещё один апгрейд к продаже — сильный мув, без лишнего шума.",
+        "🚀 Комплект собран грамотно. Автору чека — плюс в копилку скилла.",
+        "💯 Кросс-сейл по делу — именно так выглядит качественная консультация.",
+    ],
+}
+
+PRAISE_CREDIT_RE = re.compile(r"кредит|частями|скибоч|факторинг|рассрочк|привaт|моно", re.IGNORECASE)
+PRAISE_WARRANTY_RE = re.compile(r"гарант|страх", re.IGNORECASE)
+PRAISE_FLAGSHIP_RE = re.compile(r"флагман|iphone|айфон|samsung|s2\d|pro max|\bs-?ка\b|эска|ультр", re.IGNORECASE)
+
+# Положительные эмодзи в подписи к фото руководителя = «это чек сотрудника, он молодец»
+POSITIVE_CAPTION_EMOJI = ("👍", "🔥", "😎", "💪", "🫵", "👏", "🏆", "🤩", "💯", "⚡", "❤", "🎉", "🥇", "🙌", "👌", "💅", "🤯", "😱", "😳", "🥰")
+MANAGER_PRAISE_RE = re.compile(
+    r"кредит|частями|скибоч|факторинг|рассрочк|гарант|страх|флагман|ультр|\bs-?ка\b|эска|стажер|стажёр|альфа|трейд|\+",
+    re.IGNORECASE,
+)
+# Подписи, которые похожи на таблицы/статистику, а не на чек
+NOT_A_CHECK_RE = re.compile(
+    r"план|факт|статистик|итог|рейтинг|прогноз|таблиц|структур|наявн|акци|эффективност|карт-памят|карты памят|кредиты\s*/",
+    re.IGNORECASE,
+)
+
+
+def is_praise_caption(caption: str) -> bool:
+    """Фото руководителя + подпись с позитивной реакцией или упоминанием продукта = чек продавца.
+
+    Telegram не распознаёт цифры на самом фото, поэтому смотрим только на автора,
+    наличие фото и текст/эмодзи подписи к ЭТОМУ ЖЕ сообщению.
+    """
+    cap = (caption or "").strip()
+    if not cap or len(cap) > 300:
+        return False
+    # Явная позитивная реакция в подписи к фото достаточна сама по себе.
+    if any(e in cap for e in POSITIVE_CAPTION_EMOJI):
+        return True
+    # Или упоминание кредита, трейд-ин, страховки/гарантии и похожих категорий.
+    if NOT_A_CHECK_RE.search(cap):
+        return False
+    return bool(MANAGER_PRAISE_RE.search(cap))
+
+
+_CAPTION_STORES = [
+    (r"королев\w*\s*(?:лайф|life)|\bлайф\w*", "Королёва лайф"),
+    (r"королев\w*\s*(?:вф|водафон|vodafone)", "Королёва Водафон"),
+    (r"королев\w*\s*(?:кс|киевстар)", "Королёва Киевстар"),
+    (r"рабин\w*\s*(?:вф|водафон|vodafone)", "Рабина Водафон"),
+    (r"рабин\w*\s*(?:кс|киевстар)", "Одесса Рабина"),
+    (r"измаил\w*\s*(?:вф|водафон|vodafone)", "Измаил вф"),
+    (r"измаил\w*\s*(?:кс|киевстар)", "Измаил Киевстар"),
+    (r"добровольск\w*|добрик", "Добровольского 137"),
+    (r"осипов\w*", "Осипова Магазин Одеса 25"),
+    (r"пантелей\w*|пантелеймон\w*|привоз\w*", "Пантелеймоновская 25"),
+    (r"глушко", "Глушко 14"),
+    (r"арнаутск\w*", "Киевстар арнаутская"),
+    (r"черноморск\w*", "Черноморск"),
+    (r"белгород\w*", "Белгород-Днестровский"),
+    (r"старосенн\w*", "Старосенная кс"),
+    (r"преображенск\w*", "Преображенська 52"),
+]
+
+
+STORE_FRIENDLY = {
+    "Осипова Магазин Одеса 25": "Осипова 25", "Киевстар арнаутская": "Арнаутская", "Одесса Рабина": "Рабина КС",
+    "Рабина Водафон": "Рабина ВФ", "Королёва Киевстар": "Королёва КС", "Королёва Водафон": "Королёва ВФ",
+    "Королёва лайф": "Королёва Лайф", "Измаил Киевстар": "Измаил КС", "Измаил вф": "Измаил ВФ",
+    "Белгород-Днестровский": "Белгород", "Старосенная кс": "Старосенная", "Пантелеймоновская 25": "Пантелей 25",
+    "Преображенська 52": "Преображенская 52",
+}
+
+
+def store_from_caption(caption: str):
+    """Если в подписи руководителя понятно, чей это магазин - возвращаем его (иначе None)."""
+    low = (caption or "").lower().replace("ё", "е")
+    for pattern, canonical in _CAPTION_STORES:
+        if re.search(pattern, low):
+            return canonical
+    return None
+
 
 # ---- Реплики для ситуаций
 SITUATIONS = {
@@ -1073,6 +1218,52 @@ def joke_for(n: datetime) -> str:
     return pick_bag(cat, JOKES[cat])
 
 
+# ============================ ВОРОТА ДЛЯ ШУТОК И СОВЕТОВ ============================
+def gate_window(n: datetime) -> str:
+    """Окно отчётов для допуска к шуткам: утро, обед, затем вечер после 17:45."""
+    minutes = n.hour * 60 + n.minute
+    if minutes < GATE_MIDDAY_FROM[0] * 60 + GATE_MIDDAY_FROM[1]:
+        return "morning"
+    if minutes < 17 * 60 + 45:
+        return "midday"
+    return "evening"
+
+
+def reports_complete(n: datetime):
+    """True только когда сдали все ожидаемые точки для текущего окна отчётов."""
+    today = biz_date(n).isoformat()
+    window = gate_window(n)
+    reported = set(day_entries(today, window))
+    exp = expected_stores(window, today)
+    if exp:
+        miss = sorted(exp - reported)
+        return (not miss), miss
+    # Если список ожидаемых точек пока не сформирован, используем полный известный штат,
+    # а не прежний порог 14/16: требование пользователя — дождаться всех отчётов.
+    if len(reported) >= 16:
+        return True, []
+    return False, [f"мало данных: сдали {len(reported)} из 16"]
+
+
+def jokes_allowed(n: datetime) -> bool:
+    """Шутки/советы разрешены только после сдачи всех отчётов текущего окна.
+
+    Пока есть хотя бы одна несдавшая точка, запланированные напоминания имеют приоритет;
+    после напоминания бот всё равно ждёт фактической сдачи всех отчётов.
+    """
+    ok, _ = reports_complete(n)
+    return ok
+
+
+def open_is_generic(n: datetime) -> bool:
+    """Обычное утреннее приветствие (с шутками) - да; праздничное/начало-конец месяца - это поздравления, не шутки."""
+    if HOLIDAYS.get((n.month, n.day)):
+        return False
+    if n.day == 1 or (n + timedelta(days=1)).day == 1:
+        return False
+    return True
+
+
 # ============================ РЕАКЦИИ НА ОТЧЁТЫ ============================
 def report_reactions(window: str, pct, closed: bool) -> list:
     if window == "morning":
@@ -1183,28 +1374,39 @@ async def handle_report(message: Message, store: str, window: str, rep: dict, dt
 
 
 # ============================ ФОТО-ЧЕКИ ============================
-async def praise_check(message: Message, caption: str) -> None:
+async def praise_check(message: Message, caption: str, by_manager: bool = False, store: str | None = None) -> None:
+    """Похвала за фото-чек. by_manager=True: чек прислал руководитель -> хвалим ПРОДАВЦА, не руководителя."""
     n = now()
     maybe_reset_day_counters(n)
     await react(message, ["🔥", "👏", "😎", "🤩"])
-    
+
     if not can_speak(n, gap=False):
         return
-        
+
     low = caption.lower()
-    
+
     if re.search(r"туда\s*же", low):
-        pool = PRAISE_EXTRA
-    elif re.search(r"кредит|частями|скибоч|факторинг|привaт|моно", low):
-        pool = PRAISE_CREDIT
-    elif re.search(r"гарант|страх", low):
-        pool = PRAISE_WARRANTY
-    elif re.search(r"флагман|iphone|айфон|samsung|s2\d|pro max", low):
-        pool = PRAISE_FLAGSHIP
+        kind = "extra"
+    elif PRAISE_CREDIT_RE.search(low):
+        kind = "credit"
+    elif PRAISE_WARRANTY_RE.search(low):
+        kind = "warranty"
+    elif PRAISE_FLAGSHIP_RE.search(low):
+        kind = "flagship"
     else:
-        pool = PRAISE_DEFAULT
-        
-    if await say(random.choice(pool), message, track_deletable=True):
+        kind = "default"
+
+    if by_manager:
+        # Не пытаемся распознать имя продавца по фото/подписи и не обращаемся к руководителю.
+        text = pick_bag("seller_" + kind, PRAISE_SELLER[kind])
+    else:
+        pool = {
+            "extra": PRAISE_EXTRA, "credit": PRAISE_CREDIT, "warranty": PRAISE_WARRANTY,
+            "flagship": PRAISE_FLAGSHIP, "default": PRAISE_DEFAULT,
+        }[kind]
+        text = random.choice(pool)
+
+    if await say(text, message, track_deletable=True):
         RT.last_praise = time.time()
         RT.praise_n += 1
 
@@ -1243,11 +1445,11 @@ async def diag(message: Message, cmd: str) -> None:
         return
     user = message.from_user
     work = is_allowed_chat(message.chat.id)
-    ignored = bool(user and is_hq(user.full_name or "", user.id) and not TEST_MODE)
+    ignored = bool(user and is_manager(user.full_name or "", user.id) and not TEST_MODE)
     await message.reply(
         f"🤖 Статус бота\nID этого чата: {message.chat.id}\n"
         f"Этот чат разрешён (CHAT_ID): {'да' if work else 'НЕТ - добавьте этот ID в CHAT_ID'}\n"
-        f"Ваше имя: {user.full_name if user else '?'} - бот вас {'ИГНОРИРУЕТ (аккаунт офиса)' if ignored else 'слушает'}\n"
+        f"Ваше имя: {user.full_name if user else '?'} - бот вас {'не шутит (руководитель: только реакции)' if ignored else 'слушает'}\n"
         f"Время бота: {n.strftime('%d.%m %H:%M')}\n"
         f"Писать текстом: {'да' if in_speak_hours(n) else 'нет (тихие часы)'}\n"
         f"TEST_MODE: {'включён' if TEST_MODE else 'выключен'}"
@@ -1288,10 +1490,18 @@ async def on_reaction(ev: MessageReactionUpdated):
             
         if len(w["users"]) >= PHOTO_REACTORS_NEEDED and not w["done"]:
             w["done"] = True
-            store = store_name(w.get("name", ""), w["sender"])
-            STATE["karma"][store] = STATE.get("karma", {}).get(store, 0) + 1
-            save_state()
-            await praise_check(w["msg"], w["caption"])
+            if w.get("by_manager"):
+                # чек прислал руководитель: карму и похвалу получает ПРОДАВЕЦ (магазин из подписи, если он назван)
+                store = store_from_caption(w["caption"])
+                if store:
+                    STATE["karma"][store] = STATE.get("karma", {}).get(store, 0) + 1
+                    save_state()
+                await praise_check(w["msg"], w["caption"], by_manager=True, store=store)
+            else:
+                store = store_name(w.get("name", ""), w["sender"])
+                STATE["karma"][store] = STATE.get("karma", {}).get(store, 0) + 1
+                save_state()
+                await praise_check(w["msg"], w["caption"])
             
     except Exception as e:
         log.warning("Ошибка в on_reaction: %s", e)
@@ -1358,6 +1568,11 @@ async def handle_command(message: Message, cmd: str) -> None:
 async def handle_private_message(message: Message) -> None:
     user = message.from_user
     
+    # Руководитель не из списка Создателей: бот ему не шутит - только положительная реакция
+    if user and user.id not in HQ_USER_IDS and is_boss(user.full_name or "", user.id):
+        await react(message, MANAGER_REACTIONS)
+        return
+
     # Проверяем, что пишет админ (Создатель)
     if not user or user.id not in HQ_USER_IDS:
         # Если пишет обычный сотрудник — выдаем случайную шутку-отмазку из пула bot_mention
@@ -1387,6 +1602,8 @@ async def handle_private_message(message: Message) -> None:
         ent_d = day_entries(bd, "midday")
         ent_e = day_entries(bd, "evening")
         
+        ok_j, miss_j = reports_complete(now())
+        joke_gate = "разрешены (все отчёты на месте)" if ok_j else "ждём отчёты: " + escape(", ".join(miss_j[:6]))
         mute_status = "Выключен"
         if RT.mute_until > time.time():
             mute_status = datetime.fromtimestamp(RT.mute_until, TZ).strftime('%H:%M:%S')
@@ -1396,6 +1613,7 @@ async def handle_private_message(message: Message) -> None:
             f"🌅 Утро: {len(ent_m)} отчётов\n"
             f"☀️ Обед: {len(ent_d)} отчётов\n"
             f"🌙 Вечер: {len(ent_e)} отчётов\n\n"
+            f"🎭 Шутки и советы: {joke_gate}\n"
             f"🔇 Режим тишины активен до: {mute_status}",
             parse_mode="HTML"
         )
@@ -1461,15 +1679,31 @@ async def process(message: Message, edited: bool) -> None:
     n = now()
     maybe_reset_day_counters(n)
 
-    if is_hq(name, user.id):
-        await react(message, ["👍", "🔥", "😎", "💯", "🏆", "❤", "🎉"])
-        if not TEST_MODE:
-            if TECH_RE.search(low):
-                RT.tech_at = time.time()
-                mute_for(45)
-            if SERIOUS_RE.search(low):
-                mute_for(180)
-            return
+    # ---- РУКОВОДИТЕЛИ: никаких шуток и текстовых ответов, только положительные реакции ----
+    if is_manager(name, user.id):
+        # Руководителям не отвечаем текстом и не шутим. Исключение не распространяется
+        # даже на TEST_MODE для полностью тихого аккаунта 486540367.
+        await react(message, MANAGER_REACTIONS)
+        if not edited:
+            RT.last_human = time.time()
+            RT.streak = 0
+        if TECH_RE.search(low):
+            RT.tech_at = time.time()
+            mute_for(45)
+        if SERIOUS_RE.search(low):
+            mute_for(180)
+        # Только у 486540367 полная тишина, включая фото. Другие руководители могут
+        # прислать фото-чек: после двух позитивных реакций хвалим продавца, не автора.
+        if message.photo and not edited and not is_silent(name, user.id):
+            caption = (message.caption or "").strip()
+            if is_praise_caption(caption):
+                RT.photo_watch[message.message_id] = {
+                    "users": set(), "done": False, "sender": user.id, "name": name,
+                    "msg": message, "caption": caption, "by_manager": True,
+                }
+                for old in list(RT.photo_watch)[:-100]:
+                    RT.photo_watch.pop(old, None)
+        return
 
     if not edited:
         RT.last_human = time.time()
@@ -1509,16 +1743,12 @@ async def process(message: Message, edited: bool) -> None:
 
     if message.photo:
         photo_caption = (message.caption or "").strip()
-        photo_low = photo_caption.lower()
         
-        if is_boss(name, user.id) and not re.search(r"туда\s*же", photo_low):
-            await praise_check(message, photo_caption)
-        else:
-            RT.photo_watch[message.message_id] = {
-                "users": set(), "done": False, "sender": user.id, "name": name, "msg": message, "caption": photo_caption,
-            }
-            for old in list(RT.photo_watch)[:-100]:
-                RT.photo_watch.pop(old, None)
+        RT.photo_watch[message.message_id] = {
+            "users": set(), "done": False, "sender": user.id, "name": name, "msg": message, "caption": photo_caption,
+        }
+        for old in list(RT.photo_watch)[:-100]:
+            RT.photo_watch.pop(old, None)
         return
 
     if not text:
@@ -1533,7 +1763,7 @@ async def process(message: Message, edited: bool) -> None:
         RT.tech_at = time.time()
         mute_for(45)
         await react(message, ["🗿", "🤡", "🙈", "🥱"])
-        if time.time() - RT.last_tech_reply > 1800 and can_speak(n, gap=False):
+        if time.time() - RT.last_tech_reply > 1800 and can_speak(n, gap=False) and jokes_allowed(n):
             RT.last_tech_reply = time.time()
             await say(random.choice(TECH_REPLIES), message)
         return
@@ -1549,11 +1779,11 @@ async def process(message: Message, edited: bool) -> None:
             await say("🎂 Присоединяюсь к поздравлениям! Пусть план радует так же, как этот день 🎉", message)
         return
 
-    is_bot_reply = message.reply_to_message and message.reply_to_message.from_user.id == bot.id
+    is_bot_reply = message.reply_to_message and getattr(message.reply_to_message.from_user, "id", None) == bot.id
     has_bot_mention = re.search(r"\b(бот|бота|боту|ботяра)\b", low)
 
     if (is_bot_reply or has_bot_mention) and len(text) < 200:
-        if can_speak(n, gap=False):
+        if can_speak(n, gap=False) and jokes_allowed(n):
             await say(pick_bag("bot_mention", SITUATIONS["bot_mention"]), message, track_deletable=True)
         else:
             await react(message, ["🤡", "💅", "🗿", "🥱", "👀"])
@@ -1614,8 +1844,9 @@ async def on_edited(message: Message):
 
 # ============================ РАСПИСАНИЕ ============================
 SLOTS = [
-    ("open", 9, 0, "open", False),
+    # Порядок строго хронологический: заблокированная шутка не должна задерживать напоминание.
     ("nudge_m", 8, 55, "nudge_morning", False),
+    ("open", 9, 0, "open", False),
     ("sum", 9, 30, "summary", True),
     ("j10", 10, 20, "joke", False),
     ("j12", 12, 20, "joke", False),
@@ -1624,6 +1855,8 @@ SLOTS = [
     ("j15", 15, 20, "joke", False),
     ("j17", 17, 20, "joke", False),
     ("push", 17, 45, "push", False),
+    ("nudge_e", 18, 0, "nudge_evening", True),
+    ("j1840", 18, 40, "joke", False),
 ]
 
 
@@ -1631,8 +1864,10 @@ def missing_text(window: str, n: datetime, label: str):
     today = biz_date(n).isoformat()
     reported = set(day_entries(today, window))
     miss = sorted(expected_stores(window, today) - reported)
-    if len(reported) >= 8 and 1 <= len(miss) <= 4:
-        return f"{label} ещё ждём от: {', '.join(miss)}. Коллеги, не забываем 🙏"
+    if miss:
+        shown = ", ".join(miss[:6])
+        more = f" и ещё {len(miss) - 6}" if len(miss) > 6 else ""
+        return f"{label} ещё ждём от: {shown}{more}. Коллеги, не забываем 🙏"
     return None
 
 
@@ -1645,8 +1880,12 @@ async def run_slot(kind: str, fallback: bool, n: datetime) -> str:
 
     text, html = None, False
     if kind == "open":
+        if open_is_generic(n) and not jokes_allowed(n):
+            return "retry"            # ждём, пока все сдадут отчёты (слот живёт ещё SLOT_GRACE_MIN минут)
         text = open_text(n)
     elif kind == "push":
+        if not jokes_allowed(n):
+            return "retry"
         text = pick_bag("push", PUSH_MESSAGES)
     elif kind == "nudge_morning":
         text = missing_text("morning", n, "☕ Утренний отчёт")
@@ -1654,6 +1893,8 @@ async def run_slot(kind: str, fallback: bool, n: datetime) -> str:
             return "skip"
     elif kind == "nudge_midday":
         text = missing_text("midday", n, "⏳ Обеденный отчёт")
+    elif kind == "nudge_evening":
+        text = missing_text("evening", n, "🌙 Вечерний отчёт")
     elif kind == "summary":
         today = biz_date(n)
         text = build_week(week_dates(today - timedelta(days=1)), "Клуб миллионеров - итоги недели") \
@@ -1671,6 +1912,8 @@ async def run_slot(kind: str, fallback: bool, n: datetime) -> str:
     if text is None and (kind == "joke" or fallback):
         if RT.streak >= SELF_SPAM_LIMIT:
             return "skip"
+        if not jokes_allowed(n):
+            return "retry"            # не все отчёты на месте - шутки подождут
         text = joke_for(n)
         html = False
     if text is None:
@@ -1691,7 +1934,7 @@ async def tick() -> None:
     # --- Проверка на тишину (более 1 часа) ---
     if in_speak_hours(n) and RT.last_human > 0:
         if (current_time - RT.last_human > 3600) and (current_time - RT.last_silence_joke > 3600):
-            if RT.streak < SELF_SPAM_LIMIT:  # Проверка, чтобы бот не ушел в бесконечный монолог
+            if RT.streak < SELF_SPAM_LIMIT and jokes_allowed(n):  # не уходим в монолог и ждём все отчёты
                 if await say(joke_for(n), html=False, track_deletable=True):
                     RT.last_silence_joke = current_time
     # -----------------------------------------
