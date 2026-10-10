@@ -9,6 +9,8 @@ TOP TEAM - рабочий бот для чата 16 магазинов (Сота
   * ставит эмодзи-реакции на отчёты (только разрешённые Telegram эмодзи)
   * хвалит текстом, когда магазин закрыл план к обеду, и за красивые чеки (фото)
   * шлёт до 4 запланированных шуток в рабочий день и реагирует на подходящие события
+  * удаляет свои шутки, если они получают 3 дизлайка (режим самомодерации)
+  * ведет подсчет Кармы точек за лайки на фото-чеках (команда /karma)
   * напоминает, кто ещё не сдал утренний/обеденный отчёт
   * утром пишет итоги вчерашнего дня, по понедельникам - итоги недели
   * НИЧЕГО не пишет текстом после 18:00 (реакции на вечерние отчёты - включены)
@@ -105,12 +107,13 @@ PERSONAL_STORE_BY_USER_ID = {
 }
 STORE_NAMES = tuple(dict.fromkeys(STORE_BY_USER_ID.values()))
 
-# Эмодзи, которые Telegram разрешает ставить ботом как реакцию
+# Эмодзи
 ALLOWED = {
     "👍", "🔥", "🎉", "🤩", "😎", "🏆", "💯", "⚡", "🤝", "👌", "🫡", "🤗", "🙏", "👀",
     "🤡", "🙈", "🥱", "🤨", "🍾", "❤", "🤣", "😁", "👏", "💅", "🦄", "🗿",
 }
 POSITIVE = {"👍", "🔥", "❤", "🎉", "🤩", "😎", "👏", "💯", "⚡", "🏆"}
+NEGATIVE = {"👎", "🤡", "💩", "🥱", "🤮", "🤬", "🤨"}
 
 
 # ============================ ВРЕМЯ ============================
@@ -143,7 +146,7 @@ def classify_window(dt: datetime) -> str:
 
 
 # ============================ СОСТОЯНИЕ ============================
-STATE: dict = {"chat_id": None, "history": {}, "bags": {}, "done": {}, "staff_store": {}}
+STATE: dict = {"chat_id": None, "history": {}, "bags": {}, "done": {}, "staff_store": {}, "karma": {}}
 
 
 class RT:
@@ -163,6 +166,7 @@ class RT:
     last_bday = 0.0
     sit_done: set = set()
     last_sit = 0.0
+    bot_msgs: dict = {}  # Для отслеживания дизлайков на шутки
 
 
 def load_state() -> None:
@@ -852,7 +856,7 @@ SITUATIONS = {
     "women": [
         "🌷 С 8 Марта! Пусть настроение будет весенним, а клиенты - максимально приятными.",
         "💐 Девушки, с праздником! Вы - душа и двигатель этого филиала!",
-        "🌸 С 8 Марта! Пусть сегодня всё получается легко и с улыбкой.",
+        "🌸 С 8 Марта! Пусть сегодня всё получается легко и с улы গঠন и с улыбкой.",
         "🎀 Желаем весеннего вайба, комплиментов и адекватных покупателей!",
         "✨ С праздником весны! Вы делаете рабочие будни намного ярче.",
         "🌺 Пусть планы закрываются сами, а на душе будет тепло!",
@@ -909,16 +913,23 @@ def can_speak(n: datetime, gap: bool = True, jokes: bool = False) -> bool:
     return True
 
 
-async def say(text: str, msg: Message | None = None, html: bool = False) -> bool:
+async def say(text: str, msg: Message | None = None, html: bool = False, track_deletable: bool = False) -> bool:
     kwargs = {"parse_mode": "HTML"} if html else {}
     try:
         if msg is not None:
-            await msg.reply(text, **kwargs)
+            sent = await msg.reply(text, **kwargs)
         else:
             cid = get_chat_id()
             if cid is None:
                 return False
-            await bot.send_message(cid, text, **kwargs)
+            sent = await bot.send_message(cid, text, **kwargs)
+            
+        if track_deletable:
+            RT.bot_msgs[sent.message_id] = set()
+            if len(RT.bot_msgs) > 50:
+                oldest = next(iter(RT.bot_msgs))
+                del RT.bot_msgs[oldest]
+                
     except TelegramRetryAfter as e:
         await asyncio.sleep(min(e.retry_after + 1, 30))
         return False
@@ -1024,6 +1035,10 @@ def money(v) -> str:
     return f"{int(v):,}".replace(",", " ") if v else ""
 
 
+def mute_for(minutes: float) -> None:
+    RT.mute_until = max(RT.mute_until, time.time() + minutes * 60)
+
+
 async def speak_situation(kind: str, key: str, message, extra: str = "", **fmt) -> bool:
     n = now()
     maybe_reset_day_counters(n)
@@ -1098,13 +1113,11 @@ async def praise_check(message: Message, caption: str) -> None:
     maybe_reset_day_counters(n)
     await react(message, ["🔥", "👏", "😎", "🤩"])
     
-    # Сняты лимиты по времени и кол-ву сообщений. Главное чтобы не ночь.
     if not can_speak(n, gap=False):
         return
         
     low = caption.lower()
     
-    # Приоритет проверок: сначала доп, потом кредит, гарантия и т.д.
     if re.search(r"туда\s*же", low):
         pool = PRAISE_EXTRA
     elif re.search(r"кредит|частями|скибоч|факторинг|привaт|моно", low):
@@ -1116,7 +1129,7 @@ async def praise_check(message: Message, caption: str) -> None:
     else:
         pool = PRAISE_DEFAULT
         
-    if await say(random.choice(pool), message):
+    if await say(random.choice(pool), message, track_deletable=True):
         RT.last_praise = time.time()
         RT.praise_n += 1
 
@@ -1131,7 +1144,7 @@ async def diag(message: Message, cmd: str) -> None:
             return
         rep = parse_report(t)
         if not rep:
-            await message.reply("❌ Не распознал это сообщение как отчёт (нужна строка «ТО» и ещё 2 строки отчёта: Смарт, Акс, Серв, Стр, Трейд...).")
+            await message.reply("❌ Не распознал это сообщение как отчёт.")
             return
         who = (src.from_user.full_name if src.from_user else "?")
         dt = n if TEST_MODE else (src.date.astimezone(TZ) if src.date else n)
@@ -1159,9 +1172,9 @@ async def diag(message: Message, cmd: str) -> None:
     await message.reply(
         f"🤖 Статус бота\nID этого чата: {message.chat.id}\n"
         f"Этот чат разрешён (CHAT_ID): {'да' if work else 'НЕТ - добавьте этот ID в CHAT_ID'}\n"
-        f"Ваше имя: {user.full_name if user else '?'} - бот вас {'ИГНОРИРУЕТ (аккаунт головного офиса; включите TEST_MODE=1)' if ignored else 'слушает'}\n"
-        f"Время бота (с учётом TEST_MODE): {n.strftime('%d.%m %H:%M')}\n"
-        f"Писать текстом сейчас можно: {'да' if in_speak_hours(n) else 'нет (тихие часы)'}\n"
+        f"Ваше имя: {user.full_name if user else '?'} - бот вас {'ИГНОРИРУЕТ (аккаунт офиса)' if ignored else 'слушает'}\n"
+        f"Время бота: {n.strftime('%d.%m %H:%M')}\n"
+        f"Писать текстом: {'да' if in_speak_hours(n) else 'нет (тихие часы)'}\n"
         f"TEST_MODE: {'включён' if TEST_MODE else 'выключен'}"
     )
 
@@ -1171,17 +1184,40 @@ async def on_reaction(ev: MessageReactionUpdated):
     try:
         if not is_allowed_chat(ev.chat.id):
             return
+
+        # 1. Самомодерация бота (удаление своих шуток при 3 дизлайках)
+        if ev.message_id in RT.bot_msgs and ev.user:
+            new_emojis = {r.emoji for r in ev.new_reaction if isinstance(r, ReactionTypeEmoji)}
+            if new_emojis & NEGATIVE:
+                RT.bot_msgs[ev.message_id].add(ev.user.id)
+            else:
+                RT.bot_msgs[ev.message_id].discard(ev.user.id)
+            
+            if len(RT.bot_msgs[ev.message_id]) >= 3:
+                await bot.delete_message(ev.chat.id, ev.message_id)
+                del RT.bot_msgs[ev.message_id]
+                mute_for(120)  # Уходим в тишину на 2 часа
+                await bot.send_message(ev.chat.id, "🤡 Понял, шутка не зашла. Удалил и ушел в режим тишины.")
+                return
+
+        # 2. Карма за фото-чеки от коллег
         w = RT.photo_watch.get(ev.message_id)
-        if not w or w["done"] or ev.user is None or ev.user.id == w["sender"]:
+        if not w or ev.user is None or ev.user.id == w["sender"]:
             return
-        new = {r.emoji for r in ev.new_reaction if isinstance(r, ReactionTypeEmoji)}
-        if new & POSITIVE:
+            
+        new_emojis = {r.emoji for r in ev.new_reaction if isinstance(r, ReactionTypeEmoji)}
+        if new_emojis & POSITIVE:
             w["users"].add(ev.user.id)
         else:
             w["users"].discard(ev.user.id)
-        if len(w["users"]) >= PHOTO_REACTORS_NEEDED:
+            
+        if len(w["users"]) >= PHOTO_REACTORS_NEEDED and not w["done"]:
             w["done"] = True
+            store = store_name(w.get("name", ""), w["sender"])
+            STATE["karma"][store] = STATE.get("karma", {}).get(store, 0) + 1
+            save_state()
             await praise_check(w["msg"], w["caption"])
+            
     except Exception as e:
         log.warning("Ошибка в on_reaction: %s", e)
 
@@ -1191,6 +1227,7 @@ HELP_TEXT = (
     "🤖 Я бот чата TOP TEAM. Слежу за цифрами и поддерживаю вайб.\n"
     "/top - рейтинг недели по вечерним отчётам\n"
     "/today - статистика за сегодняшний день\n"
+    "/karma - топ магазинов по лайкам коллег\n"
     "/joke - сгенерировать шутку по запросу\n"
     "Отчёты и чеки отмечаю реакциями, а по утрам делаю выжимку итогов."
 )
@@ -1202,11 +1239,21 @@ async def handle_command(message: Message, cmd: str) -> None:
         await react(message, ["🫡"])  # после 18:00 текстом не пишем
         return
     today = biz_date(n)
+    
     if cmd == "/help" or cmd == "/start":
         await say(HELP_TEXT, message)
     elif cmd == "/joke":
         if time.time() - RT.last_bot > 120:
-            await say(joke_for(n), message)
+            await say(joke_for(n), message, track_deletable=True)
+    elif cmd == "/karma":
+        if not STATE.get("karma"):
+            await say("⭐ Карма пока не накоплена. Ставьте реакции на чеки коллег!", message)
+            return
+        ranked = sorted(STATE["karma"].items(), key=lambda x: -x[1])[:10]
+        medals = ["🥇", "🥈", "🥉"] + ["▪️"] * 7
+        lines = ["⭐ <b>Топ магазинов по Карме (зрительские симпатии):</b>"]
+        lines += [f"{medals[i]} {escape(s)} - {k} лайков" for i, (s, k) in enumerate(ranked)]
+        await say("\n".join(lines), message, html=True)
     elif cmd == "/top":
         start = today - timedelta(days=today.weekday())
         dates = [(start + timedelta(days=i)).isoformat() for i in range((today - start).days + 1)]
@@ -1233,10 +1280,6 @@ async def handle_command(message: Message, cmd: str) -> None:
 
 
 # ============================ ГЛАВНЫЙ ОБРАБОТЧИК ============================
-def mute_for(minutes: float) -> None:
-    RT.mute_until = max(RT.mute_until, time.time() + minutes * 60)
-
-
 async def process(message: Message, edited: bool) -> None:
     chat = message.chat
     if chat.type not in ("group", "supergroup"):
@@ -1263,7 +1306,6 @@ async def process(message: Message, edited: bool) -> None:
     n = now()
     maybe_reset_day_counters(n)
 
-    # Официальный аккаунт головного офиса: бот только "слушает" и всегда ставит реакции
     if is_hq(name, user.id):
         await react(message, ["👍", "🔥", "😎", "💯", "🏆", "❤", "🎉"])
         if not TEST_MODE:
@@ -1285,19 +1327,16 @@ async def process(message: Message, edited: bool) -> None:
         mute_for(30)
         return
 
-    # Серьёзные темы - полная тишина на 3 часа
     if SERIOUS_RE.search(low):
         mute_for(180)
         return
 
-    # Команды
     if low.startswith("/") and not edited:
         cmd = low.split()[0].split("@")[0]
-        if cmd in ("/top", "/today", "/joke", "/help", "/start"):
+        if cmd in ("/top", "/today", "/karma", "/joke", "/help", "/start"):
             await handle_command(message, cmd)
         return
 
-    # Отчёты магазинов
     if text:
         rep = parse_report(text)
         if rep:
@@ -1313,7 +1352,6 @@ async def process(message: Message, edited: bool) -> None:
     if edited:
         return
 
-    # Фото-чеки: всегда ждем 2 реакции от коллег (кроме обычных чеков босса без слова "туда же")
     if message.photo:
         photo_caption = (message.caption or "").strip()
         photo_low = photo_caption.lower()
@@ -1322,7 +1360,7 @@ async def process(message: Message, edited: bool) -> None:
             await praise_check(message, photo_caption)
         else:
             RT.photo_watch[message.message_id] = {
-                "users": set(), "done": False, "sender": user.id, "msg": message, "caption": photo_caption,
+                "users": set(), "done": False, "sender": user.id, "name": name, "msg": message, "caption": photo_caption,
             }
             for old in list(RT.photo_watch)[:-100]:
                 RT.photo_watch.pop(old, None)
@@ -1331,13 +1369,11 @@ async def process(message: Message, edited: bool) -> None:
     if not text:
         return
 
-    # Свет / генератор - деликатная тема, шуток нет
     if POWER_RE.search(low):
         mute_for(60)
         await react(message, ["🫡"])
         return
 
-    # Сбои 1С / связи
     if TECH_RE.search(low):
         RT.tech_at = time.time()
         mute_for(45)
@@ -1358,18 +1394,16 @@ async def process(message: Message, edited: bool) -> None:
             await say("🎂 Присоединяюсь к поздравлениям! Пусть план радует так же, как этот день 🎉", message)
         return
 
-    # Общение с ботом (зумерская ирония, если пишут лично ему)
     is_bot_reply = message.reply_to_message and message.reply_to_message.from_user.id == bot.id
     has_bot_mention = re.search(r"\b(бот|бота|боту|ботяра)\b", low)
 
     if (is_bot_reply or has_bot_mention) and len(text) < 200:
         if can_speak(n, gap=False):
-            await say(pick_bag("bot_mention", SITUATIONS["bot_mention"]), message)
+            await say(pick_bag("bot_mention", SITUATIONS["bot_mention"]), message, track_deletable=True)
         else:
             await react(message, ["🤡", "💅", "🗿", "🥱", "👀"])
         return
 
-    # Лёгкие социальные ситуации из реальной динамики чата
     win_re = re.compile(
         r"флагман|ультр\w*|кредит\s*\+|перв\w+\s+оплат\w+\s+частями|"
         r"красив\w+\s+чек|рекорд\w*|прогресс месяца|стажер\w*.*(удив|кредит|ультр)",
@@ -1389,12 +1423,11 @@ async def process(message: Message, edited: bool) -> None:
                 "😎 Командный чат одобряет этот апгрейд.",
                 "🫶 Отличная работа. Поддержка коллег тоже часть сильного результата!"
             ]
-            if await say(random.choice(pool), message):
+            if await say(random.choice(pool), message, track_deletable=True):
                 RT.praise_n += 1
                 RT.last_praise = time.time()
         return
 
-    # Приветствия - только реакция, один раз в день на человека
     if len(text) <= 60 and GREET_RE.search(low):
         key = (n.date().isoformat(), user.id)
         if key not in RT.greeted:
@@ -1483,7 +1516,8 @@ async def run_slot(kind: str, fallback: bool, n: datetime) -> str:
         return "skip"
     if jokes_kind and text and not can_speak(n, jokes=True):
         return "skip"
-    return "sent" if await say(text, html=html) else "retry"
+        
+    return "sent" if await say(text, html=html, track_deletable=jokes_kind) else "retry"
 
 
 async def tick() -> None:
