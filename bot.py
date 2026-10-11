@@ -65,7 +65,7 @@ except Exception:  # старые базы часовых поясов
     TZ = ZoneInfo("Europe/Kiev")
 
 SPEAK_FROM = (7, 30)     # раньше этого времени бот не пишет текстом
-SPEAK_UNTIL = (19, 0)    # После 19:00 бот не пишет текстом; вечерние отчёты могут приходить до этого времени
+SPEAK_UNTIL = (19, 0)    # Обычные текстовые сообщения — до 19:00; финальное прощание имеет отдельное исключение
 REACT_AFTER_HOURS = True  # реакции на вечерние отчёты сохраняются; текст разрешён до 19:00
 MIN_GAP_MIN = 20          # минимум минут между самостоятельными сообщениями бота
 SELF_SPAM_LIMIT = 4       # сколько сообщений бота подряд без ответа людей, потом пауза
@@ -123,6 +123,17 @@ PERSONAL_STORE_BY_USER_ID = {
     967671968: "Измаил Киевстар",   # Оксана Измаил Киевстар
 }
 STORE_NAMES = tuple(dict.fromkeys(STORE_BY_USER_ID.values()))
+
+# Предварительные графики закрытия по истории 10 октября; остальные магазины обычно закрываются в 19:00.
+# Используются только для своевременных напоминаний, а не как утверждение о фактическом закрытии.
+STORE_CLOSE_HOUR = {
+    "Белгород-Днестровский": 17,
+    "Осипова Магазин Одеса 25": 17,
+    "Измаил вф": 17,
+    "Измаил Киевстар": 17,
+    "Преображенська 52": 18,
+    "Киевстар арнаутская": 18,
+}
 
 # Эмодзи
 ALLOWED = {
@@ -271,7 +282,7 @@ def parse_shift(text: str) -> tuple[list, bool]:
     tomorrow = bool(re.search(r"завтра\s+на", text, re.IGNORECASE))
     names = []
     for part in re.split(r"[,\n;/]", m.group("names")):
-        p = part.strip(" .:\-\t\u200b")
+        p = part.strip(" .:-\t\u200b")
         if 2 <= len(p) <= 25 and NAME_RE.match(p):
             names.append(p)
     return names[:5], tomorrow
@@ -512,6 +523,11 @@ def day_entries(bd: str, window: str) -> dict:
 
 
 def expected_stores(window: str, today: str) -> set:
+    # Утренний и обеденный отчёт ожидается от всех 16 точек даже после перезапуска/в первые дни.
+    if window in ("morning", "midday"):
+        return set(STORE_NAMES)
+    if window == "evening":
+        return set(STORE_NAMES)
     days = [d for d in sorted(STATE["history"]) if d < today][-7:]
     if len(days) < 3:
         return set()
@@ -1188,9 +1204,7 @@ SITUATIONS = {
 
 # ============================ ТРИГГЕРЫ ============================
 TECH_RE = re.compile(
-    r"(?:(?:не\s?получается|не\s?работает|не\s?откр\w+|завис\w*|не\s?груз\w+).{0,40}\b1\s?[сc]\b)|"
-    r"(?:1\s?[сc].{0,30}(?:не\s?работ|не\s?получается|завис|вис|лег|лёг|упал|тормоз|глюч|не\s?груз|не\s?откр))|сбой|збій|"
-    r"не\s?работает|не\s?працює|нет\s+связи|нема\s+зв.язку|техн\w+\s+проблем",
+    r"1\s?[сc]|сбой|збій|не\s?работает|не\s?працює|нет\s+связи|нема\s+зв.язку|техн\w+\s+проблем",
     re.IGNORECASE,
 )
 TECH_FIXED_RE = re.compile(r"заработал|запрацював|уже\s+работает|вже\s+працює|всё\s+ок|все\s+ок", re.IGNORECASE)
@@ -1451,8 +1465,24 @@ async def handle_report(message: Message, store: str, window: str, rep: dict, dt
 
     if window in ("morning", "midday"):
         exp = expected_stores(window, bd)
-        if len(exp) >= 12 and exp <= set(day_entries(bd, window)):
+        if exp and exp <= set(day_entries(bd, window)):
             await speak_situation("all_" + window, window, None)
+
+    # Прощаемся только после фактической сдачи вечернего отчёта всеми 16 точками.
+    if window == "evening":
+        all_evening = expected_stores("evening", bd)
+        reported_evening = set(day_entries(bd, "evening"))
+        goodbye_days = STATE.setdefault("goodbye_sent", [])
+        goodbye_time = now()
+        goodbye_allowed = (
+            (goodbye_time.hour, goodbye_time.minute) < (19, 30)
+            and (goodbye_time.hour, goodbye_time.minute) >= SPEAK_FROM
+            and time.time() >= RT.mute_until
+        )
+        if all_evening and all_evening <= reported_evening and bd not in goodbye_days and goodbye_allowed:
+            if await say("🌙 ОФ2, все вечерние отчёты на месте — день закрыт! Спасибо за работу, выдыхаем и до завтра 👋", message):
+                goodbye_days.append(bd)
+                save_state()
 
 
 # ============================ ФОТО-ЧЕКИ ============================
@@ -1696,6 +1726,8 @@ async def handle_private_message(message: Message) -> None:
             "👑 <b>Панель управления (Создатель)</b>\n\n"
             "🕹 <b>Доступные команды:</b>\n"
             "<code>/stats</code> - статистика отчётов за сегодня\n"
+            "<code>/missing</code> - кто не сдал утро/обед/вечер с учётом графика\n"
+            "<code>/schedule</code> - графики закрытия магазинов\n"
             "<code>/say текст</code> - отправить сообщение в чат от имени бота\n"
             "<code>/joke</code> - принудительно отправить шутку прямо сейчас\n"
             "<code>/mute 120</code> - запретить боту писать на N минут (без цифры = 60)\n"
@@ -1724,6 +1756,24 @@ async def handle_private_message(message: Message) -> None:
             f"🔇 Режим тишины активен до: {mute_status}",
             parse_mode="HTML"
         )
+    elif low == "/missing":
+        n = now()
+        bd = biz_date(n).isoformat()
+        lines = [f"📋 <b>Не сдали отчёты за {bd}:</b>"]
+        for win, title in (("morning", "Утро"), ("midday", "Обед"), ("evening", "Вечер")):
+            reported = set(day_entries(bd, win))
+            missing = sorted(expected_stores(win, bd) - reported)
+            if win == "evening":
+                missing = sorted(missing, key=lambda st: STORE_CLOSE_HOUR.get(st, 19))
+            lines.append(f"<b>{title} ({len(reported)}/{len(expected_stores(win, bd))}):</b> " + (", ".join(missing) if missing else "все сдали"))
+        await message.reply("\n".join(lines), parse_mode="HTML")
+    elif low == "/schedule":
+        lines = ["🕒 <b>График вечерних отчётов (предварительно по истории):</b>"]
+        for hour in (17, 18, 19):
+            stores = sorted(st for st in STORE_NAMES if STORE_CLOSE_HOUR.get(st, 19) == hour)
+            lines.append(f"<b>До {hour}:00:</b> " + (", ".join(stores) if stores else "нет закреплённых точек"))
+        lines.append("График можно уточнять по фактическим отчётам; точки без истории относятся к 19:00.")
+        await message.reply("\n".join(lines), parse_mode="HTML")
     elif low.startswith("/say "):
         cid = get_chat_id()
         if not cid:
@@ -1792,12 +1842,7 @@ async def process(message: Message, edited: bool) -> None:
 
     # ---- РУКОВОДИТЕЛИ ----
     if is_manager(name, user.id):
-        if directed_to_bot and len(text) < 200:
-            text_to_say = pick_bag("bot_mention_manager", SITUATIONS["bot_mention_manager"])
-            await say(text_to_say, message)
-            mute_for(30)
-            return
-
+        # Руководителям отвечаем только положительными реакциями; исключений для реплаев нет.
         await react(message, MANAGER_REACTIONS)
         if not edited:
             RT.last_human = time.time()
@@ -1874,11 +1919,12 @@ async def process(message: Message, edited: bool) -> None:
 
     if TECH_RE.search(low):
         RT.tech_at = time.time()
-        mute_for(45)
         await react(message, ["🗿", "🤡", "🙈", "🥱"])
-        if time.time() - RT.last_tech_reply > 1800 and can_speak(n, gap=False) and jokes_allowed(n):
+        # Сначала шутка, потом короткий мут: иначе can_speak() блокировал сам ответ на 1С.
+        if time.time() - RT.last_tech_reply > 1800 and can_speak(n, gap=False):
             RT.last_tech_reply = time.time()
             await say(random.choice(TECH_REPLIES), message)
+        mute_for(45)
         return
     if TECH_FIXED_RE.search(low) and time.time() - RT.tech_at < 5400:
         RT.mute_until = 0.0
@@ -1960,29 +2006,39 @@ async def on_edited(message: Message):
 
 # ============================ РАСПИСАНИЕ ============================
 SLOTS = [
-    # Порядок строго хронологический: заблокированная шутка не должна задерживать напоминание.
+    # Сначала обязательные приветствие/напоминания; шутки не должны блокировать их.
+    ("greet", 8, 0, "greeting", False),
     ("nudge_m", 8, 55, "nudge_morning", False),
     ("open", 9, 0, "open", False),
     ("sum", 9, 30, "summary", True),
     ("j10", 10, 20, "joke", False),
     ("j12", 12, 20, "joke", False),
-    ("nudge_d", 13, 30, "nudge_midday", True),
+    ("nudge_d", 13, 30, "nudge_midday", False),
     ("stats", 14, 20, "midday_stats", True),
     ("j15", 15, 20, "joke", False),
+    ("nudge_e17", 16, 55, "nudge_evening_17", False),
     ("j17", 17, 20, "joke", False),
     ("push", 17, 45, "push", False),
-    ("nudge_e", 18, 0, "nudge_evening", True),
-    ("j1840", 18, 40, "joke", False),
+    ("nudge_e18", 17, 55, "nudge_evening_18", False),
+    ("j1840", 18, 20, "joke", False),
+    ("nudge_e19", 18, 55, "nudge_evening_19", False),
 ]
 
 
 def missing_text(window: str, n: datetime, label: str):
     today = biz_date(n).isoformat()
     reported = set(day_entries(today, window))
-    miss = sorted(expected_stores(window, today) - reported)
+    expected = expected_stores(window, today)
+    if window == "evening":
+        # В 16:55 напоминаем только точкам с закрытием в 17:00; в 17:55 — до 18:00;
+        # в 18:55 — всем оставшимся, включая основной график до 19:00.
+        due_hour = 17 if (n.hour, n.minute) < (17, 0) else 18 if (n.hour, n.minute) < (18, 0) else 19
+        miss = sorted(s for s in expected - reported if STORE_CLOSE_HOUR.get(s, 19) <= due_hour)
+    else:
+        miss = sorted(expected - reported)
     if miss:
-        shown = ", ".join(miss[:6])
-        more = f" и ещё {len(miss) - 6}" if len(miss) > 6 else ""
+        shown = ", ".join(miss[:8])
+        more = f" и ещё {len(miss) - 8}" if len(miss) > 8 else ""
         return f"{label} ещё ждём от: {shown}{more}. Коллеги, не забываем 🙏"
     return None
 
@@ -1995,7 +2051,9 @@ async def run_slot(kind: str, fallback: bool, n: datetime) -> str:
         return "retry"
 
     text, html = None, False
-    if kind == "open":
+    if kind == "greeting":
+        text = "☀️ Доброе утро, ОФ2! Удачной смены, сильных чеков и спокойной 1С. Поехали 🚀"
+    elif kind == "open":
         if open_is_generic(n) and not jokes_allowed(n):
             return "retry"            # ждём, пока все сдадут отчёты (слот живёт ещё SLOT_GRACE_MIN минут)
         text = open_text(n)
@@ -2009,8 +2067,12 @@ async def run_slot(kind: str, fallback: bool, n: datetime) -> str:
             return "skip"
     elif kind == "nudge_midday":
         text = missing_text("midday", n, "⏳ Обеденный отчёт")
-    elif kind == "nudge_evening":
-        text = missing_text("evening", n, "🌙 Вечерний отчёт")
+    elif kind == "nudge_evening_17":
+        text = missing_text("evening", n, "🕔 Закрытие точек до 17:00")
+    elif kind == "nudge_evening_18":
+        text = missing_text("evening", n, "🕕 Закрытие точек до 18:00")
+    elif kind == "nudge_evening_19":
+        text = missing_text("evening", n, "🌙 Вечерний отчёт (график до 19:00)")
     elif kind == "summary":
         today = biz_date(n)
         text = build_week(week_dates(today - timedelta(days=1)), "Клуб миллионеров - итоги недели") \
@@ -2072,6 +2134,10 @@ async def tick() -> None:
         if status in ("sent", "skip"):
             done.append(slot_id)
             save_state()
+            break  # не отправляем несколько плановых сообщений подряд за один тик
+        # Если шутка/сводка ждёт отчётов или паузы, не блокируем более позднее напоминание.
+        if status == "retry":
+            continue
         break
 
 
