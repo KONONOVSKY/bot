@@ -30,7 +30,6 @@ import time
 from datetime import date, datetime, timedelta
 from html import escape
 from statistics import mean
-from collections import Counter
 from zoneinfo import ZoneInfo
 
 from aiogram import Bot, Dispatcher
@@ -59,6 +58,9 @@ SPEAK_FROM = (7, 30)     # раньше этого времени бот не п
 SPEAK_UNTIL = (19, 0)    # Обычные текстовые сообщения — до 19:00; финальное прощание имеет отдельное исключение
 REACT_AFTER_HOURS = True  # реакции на вечерние отчёты сохраняются; текст разрешён до 19:00
 SLOT_GRACE_MIN = 25       # сколько минут после времени слота бот ещё может его выполнить
+JOKE_AFTER_MANAGER_MIN = 30  # шутка сдвигается на столько минут после сообщения руководителя
+JOKE_MAX_DELAY_MIN = 120     # если шутку не удалось отправить за это время, слот пропускается
+JOKE_MIN_GAP_MIN = 20        # минимум минут между сообщениями бота перед шуткой
 PHOTO_REACTORS_NEEDED = 2  # сколько людей должны поставить 👍/🔥 на фото чека
 MAX_PRAISE_PER_DAY = 8
 
@@ -110,17 +112,6 @@ PERSONAL_STORE_BY_USER_ID = {
 }
 STORE_NAMES = tuple(dict.fromkeys(STORE_BY_USER_ID.values()))
 
-# Предварительные графики закрытия по истории 10 октября; остальные магазины обычно закрываются в 19:00.
-# Используются только для своевременных напоминаний, а не как утверждение о фактическом закрытии.
-STORE_CLOSE_HOUR = {
-    "Белгород-Днестровский": 17,
-    "Осипова Магазин Одеса 25": 17,
-    "Измаил вф": 17,
-    "Измаил Киевстар": 17,
-    "Преображенська 52": 18,
-    "Киевстар арнаутская": 18,
-}
-
 # Эмодзи
 ALLOWED = {
     "👍", "🔥", "🎉", "🤩", "😎", "🏆", "💯", "⚡", "🤝", "👌", "🫡", "🤗", "🙏", "👀",
@@ -160,7 +151,7 @@ def classify_window(dt: datetime) -> str:
 
 
 # ============================ СОСТОЯНИЕ ============================
-STATE: dict = {"chat_id": None, "history": {}, "bags": {}, "done": {}, "staff_store": {}, "karma": {}, "chat_history": []}
+STATE: dict = {"chat_id": None, "history": {}, "bags": {}, "done": {}, "staff_store": {}, "karma": {}}
 
 
 class RT:
@@ -170,17 +161,13 @@ class RT:
     last_manager_message = 0.0
     mute_until = 0.0
     tech_at = 0.0
-    last_tech_reply = 0.0
     jokes_paused_until = 0.0  # Пауза шуток на 30 минут после чека руководителя
     last_praise = 0.0
     praise_day = ""
     praise_n = 0
-    midday_praised: set = set()
     greeted: set = set()
     photo_watch: dict = {}
     last_bday = 0.0
-    sit_done: set = set()
-    last_sit = 0.0
     bot_msgs: dict = {}  # Для отслеживания дизлайков на шутки
     boss_praise_toggle = False # Добавлен переключатель для Дениса и Стеллы
 
@@ -205,164 +192,6 @@ def save_state() -> None:
         os.replace(tmp, STATE_FILE)
     except Exception as e:
         log.warning("Не удалось сохранить состояние: %s", e)
-
-
-# ============================ ИСТОРИЯ И АНАЛИТИКА ЧАТА (БЕЗ API) ============================
-CHAT_HISTORY_LIMIT = 5000
-CHAT_HISTORY_DAYS = 90
-
-# Категории определяются словарями и регулярными выражениями; это эвристики, не «понимание ИИ».
-ISSUE_PATTERNS = {
-    "1С / программы": re.compile(r"\b1\s*[сc]\b|программ\w*|баз\w* не груз|не открыва\w*|завис\w*|ошибк\w*", re.I),
-    "Интернет / связь": re.compile(r"интернет|wi[ -]?fi|вай.?фай|связь|сеть не|нет сети|роутер|терминал не", re.I),
-    "Отчётность": re.compile(r"не сдал\w*|не отправил\w*|забыл отправ\w*|опоздал с отч[её]т\w*|задерж\w* отч[её]т\w*|отч[её]т\w*.{0,25}(?:не приш[её]л|не сдал|не отправил|задерж|опоздал)", re.I),
-    "Касса / оплата": re.compile(r"касс\w*|терминал|оплат\w* не проход|эквайринг|чек не печат", re.I),
-    "Товар / остатки": re.compile(r"остатк\w*|нет в наличии|товар\w* нет|поставк\w*|перемещени\w*", re.I),
-    "Клиент / конфликт": re.compile(r"жалоб\w*|конфликт\w*|клиент\w* недоволен|скандал|претензи\w*", re.I),
-    "График / персонал": re.compile(r"опоздал\w*|не вышел|замен\w*|смен\w*|график\w*|боле\w*|подмен\w*", re.I),
-}
-PROMISE_RE = re.compile(r"\b(сделаю|сделаем|проверю|проверим|отправлю|скину|пришлю|позвоню|уточню|исправлю|решу|занесу|напишу|перезвоню|завтра сделаю|постараюсь|обещаю|до конца дня|к \d{1,2}[:.]?\d{0,2})\b", re.I)
-RESOLVED_RE = re.compile(r"\b(сделал[аи]?|готово|отправил[аи]?|скинул[аи]?|приш[её]л ответ|решили|исправил[аи]?|проверил[аи]?|всё работает|все работает|вопрос закрыт|выполнено|выполнил[аи]?)\b", re.I)
-VIOLATION_RE = re.compile(r"не сдал|не отправил|забыл|опоздал|снова не|опять не|не успел|просроч\w*|наруш\w*|не выполнил|не сделал|игнорир\w*", re.I)
-
-
-def _history_timestamp(item: dict) -> datetime | None:
-    try:
-        return datetime.fromisoformat(item.get("ts", ""))
-    except (TypeError, ValueError):
-        return None
-
-
-def remember_chat_message(message: Message, edited: bool = False) -> None:
-    """Сохраняет новые текстовые сообщения и правки; хранит ограниченную историю для аналитики."""
-    text = (message.text or message.caption or "").strip()
-    if not text or message.from_user is None:
-        return
-    n = message.date.astimezone(TZ) if message.date else now()
-    user = message.from_user
-    store = store_name(user.full_name or "", user.id, text)
-    entry = {
-        "chat_id": message.chat.id,
-        "message_id": message.message_id,
-        "reply_to": message.reply_to_message.message_id if message.reply_to_message else None,
-        "ts": n.isoformat(timespec="seconds"),
-        "date": n.date().isoformat(),
-        "user_id": user.id,
-        "name": (user.full_name or "Неизвестный сотрудник")[:100],
-        "store": store,
-        "text": text[:3000],
-        "edited": bool(edited),
-        "report": bool(parse_report(text)),
-        "issues": [label for label, pattern in ISSUE_PATTERNS.items() if pattern.search(text)],
-        "promise": bool(PROMISE_RE.search(text)),
-        "violation": bool(VIOLATION_RE.search(text)),
-    }
-    history = STATE.setdefault("chat_history", [])
-    found = next((i for i, old in enumerate(history) if old.get("chat_id") == entry["chat_id"] and old.get("message_id") == entry["message_id"] and old.get("user_id") == entry["user_id"]), None)
-    if found is not None:
-        history[found] = entry
-    else:
-        history.append(entry)
-    cutoff = n - timedelta(days=CHAT_HISTORY_DAYS)
-    history[:] = [x for x in history if (_history_timestamp(x) or n) >= cutoff]
-    if len(history) > CHAT_HISTORY_LIMIT:
-        del history[:-CHAT_HISTORY_LIMIT]
-    save_state()
-
-
-def _recent_history(days: int = 30) -> list[dict]:
-    cutoff = now() - timedelta(days=days)
-    result = []
-    for item in STATE.get("chat_history", []):
-        dt = _history_timestamp(item)
-        if dt and dt >= cutoff:
-            result.append(item)
-    return result
-
-
-def _resolved_promises(history: list[dict]) -> tuple[list[dict], list[dict]]:
-    promises = [x for x in history if x.get("promise")]
-    unresolved, resolved = [], []
-    for promise in promises:
-        pdt = _history_timestamp(promise)
-        later = [x for x in history if x.get("user_id") == promise.get("user_id") and (_history_timestamp(x) or now()) > (pdt or now())]
-        if any(RESOLVED_RE.search(x.get("text", "")) for x in later[-12:]):
-            resolved.append(promise)
-        else:
-            unresolved.append(promise)
-    return unresolved, resolved
-
-
-def build_chat_analysis(days: int = 7) -> str:
-    history = _recent_history(days)
-    if not history:
-        return ("🧠 <b>Анализ истории чата</b>\nЗа выбранный период сохранённых сообщений пока нет. "
-                "Бот начнёт накапливать историю с момента обновления; прошлые сообщения автоматически не загрузятся.")
-    messages = len(history)
-    people = Counter(x.get("store") or x.get("name", "Неизвестно") for x in history)
-    issues = Counter(label for x in history for label in x.get("issues", []))
-    violations = [x for x in history if x.get("violation")]
-    reports = [x for x in history if x.get("report")]
-    unresolved, resolved = _resolved_promises(history)
-    # Повторяющаяся проблема: категория встречалась не менее 3 раз; число сообщений, не число доказанных инцидентов.
-    recurring = [(k, v) for k, v in issues.most_common() if v >= 3]
-    lines = [f"🧠 <b>Анализ рабочего чата за {days} дн.</b>",
-             f"Сообщений: <b>{messages}</b> · активных авторов/точек: <b>{len(people)}</b>",
-             f"Сообщений, похожих на отчёты: <b>{len(reports)}</b>",
-             f"Сообщений с маркерами возможного нарушения/задержки: <b>{len(violations)}</b>",
-             f"Обещаний/задач по ключевым словам: <b>{len(unresolved) + len(resolved)}</b> · вероятно закрыто: <b>{len(resolved)}</b> · без явного подтверждения: <b>{len(unresolved)}</b>"]
-    if recurring:
-        lines.append("\n<b>🔁 Повторяющиеся темы (3+ упоминания):</b>")
-        lines.extend(f"• {escape(k)} — {v} упоминаний" for k, v in recurring[:6])
-    elif issues:
-        lines.append("\n<b>Темы, отмеченные правилами:</b>")
-        lines.extend(f"• {escape(k)} — {v}" for k, v in issues.most_common(5))
-    if violations:
-        lines.append("\n<b>⚠️ Последние сообщения с маркерами задержки/проблемы:</b>")
-        for x in violations[-5:]:
-            dt = _history_timestamp(x)
-            stamp = dt.strftime("%d.%m %H:%M") if dt else "дата неизвестна"
-            snippet = re.sub(r"\s+", " ", x.get("text", ""))[:125]
-            lines.append(f"• {stamp} · {escape(x.get('store') or x.get('name',''))}: {escape(snippet)}")
-    if unresolved:
-        lines.append("\n<b>📌 Обещания без явного подтверждения:</b>")
-        for x in unresolved[-5:]:
-            dt = _history_timestamp(x)
-            stamp = dt.strftime("%d.%m") if dt else "?"
-            snippet = re.sub(r"\s+", " ", x.get("text", ""))[:110]
-            lines.append(f"• {stamp} · {escape(x.get('store') or x.get('name',''))}: {escape(snippet)}")
-    lines.append("\n<i>Это поиск по ключевым словам и статистике, не ИИ-вывод и не доказательство нарушения. Система может пропускать контекст и требовать проверки человеком.</i>")
-    return "\n".join(lines)[:3900]
-
-
-def build_issues_report(days: int = 30) -> str:
-    history = _recent_history(days)
-    counts = Counter(label for x in history for label in x.get("issues", []))
-    if not counts:
-        return f"🔎 За {days} дней правила не нашли сообщений с известными типами проблем. Это не гарантирует, что проблем не было."
-    lines = [f"🔎 <b>Проблемы и повторения за {days} дней</b>"]
-    for label, count in counts.most_common(10):
-        examples = [x for x in history if label in x.get("issues", [])]
-        stores = Counter(x.get("store") or x.get("name", "?") for x in examples)
-        top = ", ".join(f"{escape(k)} ({v})" for k, v in stores.most_common(3))
-        lines.append(f"• <b>{escape(label)}</b>: {count} сообщений. Чаще: {top}")
-    lines.append("\n<i>Считаются сообщения, совпавшие с правилами; одно сообщение может относиться к нескольким темам.</i>")
-    return "\n".join(lines)[:3900]
-
-
-def build_promises_report(days: int = 30) -> str:
-    history = _recent_history(days)
-    unresolved, resolved = _resolved_promises(history)
-    lines = [f"📌 <b>Обещания и задачи за {days} дней</b>", f"Без явного подтверждения: {len(unresolved)} · вероятно закрыто: {len(resolved)}"]
-    for x in unresolved[-12:]:
-        dt = _history_timestamp(x)
-        stamp = dt.strftime("%d.%m %H:%M") if dt else "?"
-        snippet = re.sub(r"\s+", " ", x.get("text", ""))[:150]
-        lines.append(f"• {stamp} · {escape(x.get('store') or x.get('name',''))}: {escape(snippet)}")
-    if not unresolved:
-        lines.append("Нет обещаний, требующих внимания по текущим правилам.")
-    lines.append("\n<i>Статус «без подтверждения» означает лишь, что в последующих сообщениях автора не найдено слов о выполнении.</i>")
-    return "\n".join(lines)[:3900]
 
 
 def env_chat_ids() -> list:
@@ -405,11 +234,6 @@ CAT_PATTERNS = {
     "credit": re.compile(r"^\W*(?:кредит|крдт|то\s+кредит)\b\s*[:\-]?\s*(?P<rest>.*)$", re.IGNORECASE),
 }
 
-MARKER_RE = re.compile(
-    r"^\W*(?:[cс]март|тел|сер|[cс]у\b|ак[cс]|стр|трейд|trade|заявк|крдт|кредит|"
-    r"(?:завтра\s+)?на\s+(?:смене|зміні|змене))",
-    re.IGNORECASE,
-)
 SHIFT_RE = re.compile(r"на\s+(?:смене|зміні|змене)\s*[:\-]?\s*(?P<names>.+)", re.IGNORECASE | re.DOTALL)
 NAME_RE = re.compile(r"^[A-Za-zА-Яа-яЁёІіЇїЄєҐґ'’\-]+(?:\s+[A-Za-zА-Яа-яЁёІіЇїЄєҐґ'’\-]+)?$")
 
@@ -712,30 +536,8 @@ def build_yesterday(today: date):
     return "\n".join(lines)
 
 
-def build_week(dates: list, title: str):
-    stats = evening_stats(dates)
-    avg = {s: mean(min(p, 300) for _, p in v) for s, v in stats.items() if len(v) >= 3}
-    if len(avg) < 5:
-        return None
-    ranked = sorted(avg.items(), key=lambda x: -x[1])
-    medals = ["🥇", "🥈", "🥉"]
-    lines = [f"🏆 <b>{title}</b>"]
-    for i, (s, a) in enumerate(ranked[:3]):
-        lines.append(f"{medals[i]} {escape(s)} - {pct_str(a)} в среднем")
-    best = max(((s, d, p) for s, v in stats.items() for d, p in v if p < 1000), key=lambda x: x[2], default=None)
-    if best:
-        lines.append(f"🚀 Рекорд дня: <b>{escape(best[0])}</b> - {pct_str(best[2])}")
-    full = [s for s, v in stats.items() if len(v) >= len(dates) and len(dates) >= 5]
-    if full and len(full) <= 8:
-        lines.append("🎖 Железные отчётники (все вечерние отчёты в срок): " + ", ".join(escape(s) for s in sorted(full)))
-    elif full:
-        lines.append(f"🎖 Железная дисциплина: {len(full)} точек сдали все вечерние отчёты недели!")
-    lines.append("\n<i>Новая неделя - новая гонка!</i>")
-    return "\n".join(lines)
 
 
-def week_dates(end: date, days: int = 7) -> list:
-    return [(end - timedelta(days=i)).isoformat() for i in range(days - 1, -1, -1)]
 
 
 # ============================ БАНК ФРАЗ ============================
@@ -782,21 +584,6 @@ JOKES = {
         "💡 Совет: кредит часто помогает решить вопрос «дорого». Предложите клиенту рассмотреть оплату частями.",
     ],
 }
-
-OPEN_MESSAGES = [
-    "☀️ Утро началось! Настрой на максимум. Погнали!",
-    "🔮 Гороскоп на сегодня: много вопросов «а есть такой же, но дешевле?». Спойлер: продадим всё равно.",
-    "⚡️ Клятва дня: без страховки телефон не отдаем. Удачной смены!",
-    "🚀 Новый день - новые чеки. Ждем утренние цифры, а вечером идем на рекорды!",
-    "🌤️ Доброе утро! Пусть сегодня будет больше адекватных диалогов и меньше сюрпризов от 1С.",
-    "📡 Команда, утренний пинг прошел. Желаю уверенного старта всем 16 магазинам!",
-    "🎮 Новый день загружен. Пусть квесты от клиентов будут легкими, а допы продаются сами.",
-    "🫶 Всем бодрого утра! Держим связь, не забываем про вайб.",
-    "☕ Первым делом - настрой, потом отчёт, дальше - дело техники. Удачной смены!",
-    "✨ Пусть сегодня заходят только те клиенты, которые точно знают, чего хотят, и согласны на всё.",
-    "📈 Желаю ровного старта без суеты и мощного финиша без нервов.",
-    "😎 Доброе утро! Держим планку, улыбаемся и выполняем планы.",
-]
 
 PUSH_MESSAGES = [
     "🏁 Финальный босс смены уже виден. Спокойно добираем продажи — без паники и магии.",
@@ -989,15 +776,6 @@ _CAPTION_STORES = [
 ]
 
 
-STORE_FRIENDLY = {
-    "Осипова Магазин Одеса 25": "Осипова 25", "Киевстар арнаутская": "Арнаутская", "Одесса Рабина": "Рабина КС",
-    "Рабина Водафон": "Рабина ВФ", "Королёва Киевстар": "Королёва КС", "Королёва Водафон": "Королёва ВФ",
-    "Королёва лайф": "Королёва Лайф", "Измаил Киевстар": "Измаил КС", "Измаил вф": "Измаил ВФ",
-    "Белгород-Днестровский": "Белгород", "Старосенная кс": "Старосенная", "Пантелеймоновская 25": "Пантелей 25",
-    "Преображенська 52": "Преображенская 52",
-}
-
-
 def store_from_caption(caption: str):
     low = (caption or "").lower().replace("ё", "е")
     for pattern, canonical in _CAPTION_STORES:
@@ -1122,114 +900,6 @@ SITUATIONS = {
         "Бот загружен на 10%, а ты? Включай режим турбо! 🚀",
         "Ты написал боту. Бот прочитал. Мир не изменился. Иди продай страховку! 🛡️"
     ],
-    "plan_midday": [
-        "🔥 {store} вынес план до обеда{p}! Вот это скорость 👏",
-        "👑 {store}: план готов к обеду{p}. Остальные, равняемся!",
-        "🚀 {store} включил турбо-режим - план закрыт до обеда{p}!",
-        "💥 {store} уже перевыполнил норму{p}. Вы там читы используете?",
-        "😎 {store} уходит на обед с чувством выполненного долга{p}!",
-        "🏆 План к обеду - это уже спидран. {store}, вы топ{p}!",
-        "⚡ {store}, вы быстрее терминала! План закрыт{p}.",
-        "🎯 Жестко и по делу! {store} сделал план к обеду{p}.",
-        "🍾 {store}: план готов{p}. Официально разрешаю гордиться!",
-        "🌟 Пока другие раскачиваются, {store} уже думает о перевыполнении{p}!",
-    ],
-    "trade": [
-        "🔄 {store} качает трейд-ин с утра пораньше. Хороший скилл!",
-        "♻️ {store} дает старым телефонам новую жизнь. Трейд-ин к обеду - это база!",
-        "📲 {store}, обмен идёт полным ходом! Умеете аргументировать.",
-        "🤝 Трейд-ин - это профит для всех. {store}, вы в этом шарите!",
-        "💼 {store} стабильно закрывает обмены. Правильный фокус!",
-        "🎉 Трейд-ины у {store} залетают на ура. Так держать!",
-        "🔥 {store}, обмены в онлайне! Фокус дня отрабатывается.",
-        "👏 {store}: аплодисменты за трейд-ины. Экологично и выгодно.",
-        "😎 Трейд-ин сейчас решает проблему цены. {store} это уже доказали!",
-        "🏅 {store} в лидерах по обменам. Берем пример!"
-    ],
-    "big": [
-        "💰 {store} оформил кассу на {fact} грн к обеду. Жирно!",
-        "🐋 У {store} уже {fact} грн. Крупный улов, так держать!",
-        "💸 {fact} грн к обеду у {store} - нормальный такой размах!",
-        "🚀 {store}: {fact} грн к обеду. Касса дымится!",
-        "😎 {store} собрал {fact} грн. Темп отличный, команда!",
-        "🔥 {fact} грн у {store} - интригуете перед вечерним отчётом!",
-        "👑 {store} задаёт планку: {fact} грн до обеда!",
-        "🏆 {fact} грн к обеду - {store} работает на опыте!",
-        "💎 Тяжелый люкс у {store}: уже {fact} грн за полдня. Слэй!",
-        "🎯 {store}, {fact} грн к обеду - снимаем шляпу!"
-    ],
-    "ins": [
-        "🛡 {store} продает спокойствие: страховки на {ins} грн уже к обеду!",
-        "🔒 {store} бережет нервы клиентов: {ins} грн по страховкам!",
-        "👏 Допы качаются отлично - {ins} грн к обеду. Хороший результат!",
-        "😎 {store} умеет доносить ценность защиты. {ins} грн - пруф!",
-        "💪 {ins} грн в страховках у {store}. Мастера кросс-сейла!",
-        "🏅 Защита - это забота. {store} зафиксировал её на {ins} грн!",
-        "🛠 {store}, {ins} грн по страховкам! Экраны спасены заранее.",
-        "🔥 Страховки у {store} в огне: {ins} грн к обеду!",
-        "🧠 Адекватный клиент берет страховку. {store} нашел таких на {ins} грн!",
-        "🎯 {store}: {ins} грн по страховкам. Аргументы работают!"
-    ],
-    "zero": [
-        "☕ {store}, пока затишье? Бывает. Ждем наплыв к вечеру, без паники.",
-        "🌤 {store}, копим энергию. Включаем вайб - клиенты подтянутся!",
-        "💪 {store}, у вас впереди еще полдня, чтобы перевернуть игру.",
-        "🙂 {store}, ноль - это просто старт. Дальше будут только плюсы!",
-        "🔋 {store}, пьем кофе, выдыхаем - вечер всё исправит!",
-        "🍀 {store}, поздний старт - не приговор. Работаем дальше!",
-        "🌈 {store}, после долгой паузы заходят самые жирные чеки. Ждём!",
-        "🧭 {store}, план пока далеко, но один клиент может всё поменять.",
-        "😌 {store}, спокойствие. Клиенты просто ещё не проснулись!",
-        "🚶 {store}, пока тишина - можно привести витрину в идеал."
-    ],
-    "all_morning": [
-        "🎉 Утренний чек-ин пройден на 100%! Идеальная синхронизация.",
-        "👏 Утренние отчёты сданы всеми. Вот это слаженность!",
-        "☀️ Все точки на связи с цифрами. Кайфовое начало дня!",
-        "🫡 Утро закрыто без потерь. Красавчики все смены!",
-        "💪 Никто не забыл про отчёт. Так держать, филиал!",
-        "😎 Утренние цифры в сборе. Можно спокойно пить кофе!",
-        "🏆 100% явка по отчётам. Железная дисциплина!",
-        "🔥 Утро начинается с порядка - все отчёты на месте.",
-        "🤝 Команда работает как швейцарские часы. Спасибо!",
-        "🥳 Утренний roll call закрыт! Погнали продавать."
-    ],
-    "all_midday": [
-        "🎉 Обеденный экватор пройден - отчёты сдали все!",
-        "👏 Обеденные цифры в базе. Отличная командная работа!",
-        "🫡 Полный комплект отчётов к обеду - топчик всем!",
-        "😎 Ни одной пропущенной точки. Филиал на связи!",
-        "💪 Обед закрыт на 100%. Вторая половина дня - на рекорды!",
-        "🏆 Обеденный чек-ин успешен. Команда топ!",
-        "🔥 Середина дня, а цифры уже у всех. Порядок!",
-        "🤝 Все отчитались без пушей и напоминаний - уважаю!",
-        "🥳 Обеденные данные собраны. Выдыхаем и работаем дальше!",
-        "✅ Все на месте. Держим темп до самого вечера!"
-    ],
-    "early": [
-        "🏁 {store} закрыл план до 18:00{p}! Спидран дня засчитан.",
-        "🔥 {store} отчитался досрочно - план выполнен{p}. Сильно!",
-        "👑 {store}: план готов, отчёт сдан{p}. Образцово-показательно!",
-        "🚀 {store}, вы сегодня в лидерах{p}! Аплодисменты!",
-        "😎 {store} сдал вечерний отчёт до 18:00 с планом{p}. Вот это стиль!",
-        "💪 Закрыть день до заката - это уровень. {store}, браво{p}!",
-        "🏆 {store} уже на финише с планом{p}. Остальные - дожимаем!",
-        "🎯 {store}: план в кармане, отчёт отправлен{p}. Идеально!",
-        "🥳 {store} сегодня задает ритм всему филиалу{p}!",
-        "🌟 Пока остальные допродают, {store} уже отдыхает с выполненным планом{p}!"
-    ],
-    "late": [
-        "😉 Главное, что цифры дошли и в такое время.",
-        "🤝 Отчет принят! Чуть с опозданием, но главное результат.",
-        "⏳ Цифры в базе. Запоздали, но бывает!",
-        "☕ Принято. Главное, что не забыли отправить!",
-        "🙂 Зафиксировал. Лучше поздно, чем никогда!",
-        "🫡 Отчет получен! Время не идеальное, но цифры на месте.",
-        "👌 Принято! Рабочие моменты, время прощаем.",
-        "💪 Опоздание засчитано, но главное - цифры в кассе!",
-        "🤗 Всё хорошо, отчет у меня, хоть и с задержкой.",
-        "✅ Есть контакт! По времени чуть выбились, но работаем."
-    ],
     "farewell": [
         "🤗 Спасибо за всё! Пусть на новом месте будет такой же классный вайб.",
         "🫡 Было круто работать вместе. Успехов на новом пути!",
@@ -1284,10 +954,10 @@ SITUATIONS = {
 
 # ============================ ТРИГГЕРЫ ============================
 TECH_RE = re.compile(
-    r"1\s?[сc]|сбой|збій|не\s?работает|не\s?працює|нет\s+связи|нема\s+зв.язку|техн\w+\s+проблем",
+    r"(?<!\w)1[сc](?!\w)|сбой|збій|не\s?работает|не\s?працює|нет\s+связи|нема\s+зв.язку|техн\w+\s+проблем",
     re.IGNORECASE,
 )
-ONE_C_RE = re.compile(r"1\s?[сc]", re.IGNORECASE)
+ONE_C_RE = re.compile(r"(?<!\w)1[сc](?!\w)", re.IGNORECASE)
 TECH_FIXED_RE = re.compile(r"заработал|запрацював|уже\s+работает|вже\s+працює|всё\s+ок|все\s+ок", re.IGNORECASE)
 
 def in_joke_window(n: datetime) -> bool:
@@ -1369,13 +1039,14 @@ def pick_bag(cat: str, items: list) -> str:
 HOLIDAYS = {(1, 1): "newyear", (12, 31): "newyear", (3, 8): "women"}
 
 
-def open_text(n: datetime) -> str:
+def greeting_text(n: datetime) -> str:
+    """Единственное приветствие дня (8:00): в праздники и 1-го числа - поздравление, в остальные дни обычный текст."""
     cat = HOLIDAYS.get((n.month, n.day))
     if not cat and n.day == 1:
         cat = "month_start"
     if cat:
         return pick_bag(cat, SITUATIONS[cat])
-    return pick_bag("open", OPEN_MESSAGES)
+    return "☀️ Доброе утро, ОФ2! Удачной смены, сильных чеков и спокойной 1С. Поехали 🚀"
 
 
 def joke_for(n: datetime) -> str:
@@ -1385,40 +1056,6 @@ def joke_for(n: datetime) -> str:
         cats += ["lunch"]
     cat = random.choice(cats)
     return pick_bag(cat, JOKES[cat])
-
-
-# ============================ ВОРОТА ДЛЯ ШУТОК И СОВЕТОВ ============================
-def gate_window(n: datetime) -> str:
-    """Окно отчётов для допуска: утро, обед, затем вечер после 17:45."""
-    minutes = n.hour * 60 + n.minute
-    if minutes < GATE_MIDDAY_FROM[0] * 60 + GATE_MIDDAY_FROM[1]:
-        return "morning"
-    if minutes < 17 * 60 + 45:
-        return "midday"
-    return "evening"
-
-
-def reports_complete(n: datetime):
-    """True только когда сдали все ожидаемые точки для текущего окна отчётов."""
-    today = biz_date(n).isoformat()
-    window = gate_window(n)
-    reported = set(day_entries(today, window))
-    exp = expected_stores(window, today)
-    if exp:
-        miss = sorted(exp - reported)
-        return (not miss), miss
-    if len(reported) >= 16:
-        return True, []
-    return False, [f"мало данных: сдали {len(reported)} из 16"]
-
-
-def open_is_generic(n: datetime) -> bool:
-    """Обычное утреннее приветствие; праздники и начало месяца обрабатываются отдельно."""
-    if HOLIDAYS.get((n.month, n.day)):
-        return False
-    if n.day == 1:
-        return False
-    return True
 
 
 MIDDAY_TEAM_MOTIVATION = [
@@ -1483,34 +1120,15 @@ def maybe_reset_day_counters(n: datetime) -> None:
     if RT.praise_day != d:
         RT.praise_day = d
         RT.praise_n = 0
-        RT.midday_praised = set()
         RT.greeted = set()
-        RT.sit_done = set()
 
 
-def money(v) -> str:
-    return f"{int(v):,}".replace(",", " ") if v else ""
 
 
 def mute_for(minutes: float) -> None:
     RT.mute_until = max(RT.mute_until, time.time() + minutes * 60)
 
 
-async def speak_situation(kind: str, key: str, message, extra: str = "", **fmt) -> bool:
-    n = now()
-    maybe_reset_day_counters(n)
-    k = (kind, key)
-    if k in RT.sit_done or RT.praise_n >= MAX_PRAISE_PER_DAY:
-        return False
-    if time.time() - RT.last_sit < 120 or not can_speak(n, gap=False):
-        return False
-    text = pick_bag(kind, SITUATIONS[kind]).format(**fmt) + extra
-    if await say(text, message):
-        RT.sit_done.add(k)
-        RT.praise_n += 1
-        RT.last_sit = time.time()
-        return True
-    return False
 
 
 async def handle_report(message: Message, store: str, window: str, rep: dict, dt: datetime) -> None:
@@ -1709,7 +1327,6 @@ HELP_TEXT = (
     "/today - статистика за сегодняшний день\n"
     "/karma - топ магазинов по лайкам коллег\n"
     "/joke - сгенерировать шутку по запросу\n"
-    "Аналитика истории доступна Создателям в личке: /analysis, /issues, /promises.\n"
     "Отчёты и чеки отмечаю реакциями, а по утрам делаю выжимку итогов."
 )
 
@@ -1791,10 +1408,6 @@ async def handle_private_message(message: Message) -> None:
             "🕹 <b>Доступные команды:</b>\n"
             "<code>/stats</code> - статистика отчётов за сегодня\n"
             "<code>/missing</code> - кто не сдал утро/обед/вечер с учётом графика\n"
-            "<code>/schedule</code> - графики закрытия магазинов\n"
-            "<code>/analysis</code> - сводный анализ истории за 7 дней\n"
-            "<code>/issues</code> - проблемы и повторения за 30 дней\n"
-            "<code>/promises</code> - обещания без явного подтверждения\n"
             "<code>/say текст</code> - отправить сообщение в чат от имени бота\n"
             "<code>/joke</code> - принудительно отправить шутку прямо сейчас\n"
             "<code>/mute 120</code> - запретить боту писать на N минут (без цифры = 60)\n"
@@ -1828,16 +1441,7 @@ async def handle_private_message(message: Message) -> None:
         for win, title in (("morning", "Утро"), ("midday", "Обед"), ("evening", "Вечер")):
             reported = set(day_entries(bd, win))
             missing = sorted(expected_stores(win, bd) - reported)
-            if win == "evening":
-                missing = sorted(missing, key=lambda st: STORE_CLOSE_HOUR.get(st, 19))
             lines.append(f"<b>{title} ({len(reported)}/{len(expected_stores(win, bd))}):</b> " + (", ".join(missing) if missing else "все сдали"))
-        await message.reply("\n".join(lines), parse_mode="HTML")
-    elif low == "/schedule":
-        lines = ["🕒 <b>График вечерних отчётов (предварительно по истории):</b>"]
-        for hour in (17, 18, 19):
-            stores = sorted(st for st in STORE_NAMES if STORE_CLOSE_HOUR.get(st, 19) == hour)
-            lines.append(f"<b>До {hour}:00:</b> " + (", ".join(stores) if stores else "нет закреплённых точек"))
-        lines.append("График можно уточнять по фактическим отчётам; точки без истории относятся к 19:00.")
         await message.reply("\n".join(lines), parse_mode="HTML")
     elif low.startswith("/say "):
         cid = get_chat_id()
@@ -1849,7 +1453,7 @@ async def handle_private_message(message: Message) -> None:
         await message.reply("✅ Отправлено в рабочий чат.")
     elif low == "/joke":
         if not in_joke_window(now()) or jokes_temporarily_paused():
-            await message.reply("⏰ Шутки доступны с 10:00 до 12:00 и с 14:00 до 16:00; после чека руководителя действует пауза 30 минут.")
+            await message.reply("⏰ Шутки доступны с 11:00 до 13:00 и с 15:00 до 17:00; после чека руководителя действует пауза 30 минут.")
             return
         cid = get_chat_id()
         if not cid:
@@ -1866,13 +1470,6 @@ async def handle_private_message(message: Message) -> None:
     elif low == "/unmute":
         RT.mute_until = 0.0
         await message.reply("🔊 Режим тишины снят. Бот снова может шутить и комментировать.")
-    elif low in ("/analysis", "/analysis30"):
-        days = 30 if low == "/analysis30" else 7
-        await message.reply(build_chat_analysis(days), parse_mode="HTML")
-    elif low == "/issues":
-        await message.reply(build_issues_report(30), parse_mode="HTML")
-    elif low == "/promises":
-        await message.reply(build_promises_report(30), parse_mode="HTML")
     elif low == "/state":
         try:
             state_str = json.dumps(STATE, ensure_ascii=False, indent=2)
@@ -1910,8 +1507,6 @@ async def process(message: Message, edited: bool) -> None:
     low = text.lower()
     n = now()
     maybe_reset_day_counters(n)
-    # Сохраняем обычные сообщения и подписи к фото для последующей статистики/анализа.
-    remember_chat_message(message, edited=edited)
 
     is_bot_reply = message.reply_to_message and getattr(message.reply_to_message.from_user, "id", None) == bot.id
     has_bot_mention = re.search(r"\b(бот|бота|боту|ботяра)\b", low)
@@ -1994,7 +1589,6 @@ async def process(message: Message, edited: bool) -> None:
         RT.tech_at = time.time()
         await react(message, ["🗿", "🤡", "🙈", "🥱"])
         if in_joke_window(n) and not jokes_temporarily_paused() and can_speak(n, gap=False):
-            RT.last_tech_reply = time.time()
             await say(random.choice(TECH_REPLIES), message, track_deletable=True)
         return
 
@@ -2085,7 +1679,6 @@ SLOTS = [
     # Сначала обязательные приветствие/напоминания; шутки не должны блокировать их.
     ("greet", 8, 0, "greeting", False),
     ("nudge_m", 8, 55, "nudge_morning", False),
-    ("open", 9, 0, "open", False),
     ("sum", 9, 30, "summary", True),
     ("tips", 10, 0, "tips", False),
     ("j11", 11, 0, "joke", False),
@@ -2093,10 +1686,7 @@ SLOTS = [
     ("nudge_d", 13, 30, "nudge_midday", False),
     ("j15", 15, 0, "joke", False),
     ("j16", 16, 0, "joke", False),
-    ("nudge_e17", 16, 55, "nudge_evening_17", False),
     ("push", 17, 45, "push", False),
-    ("nudge_e18", 17, 55, "nudge_evening_18", False),
-    ("nudge_e19", 18, 55, "nudge_evening_19", False),
 ]
 
 
@@ -2104,13 +1694,7 @@ def missing_text(window: str, n: datetime, label: str):
     today = biz_date(n).isoformat()
     reported = set(day_entries(today, window))
     expected = expected_stores(window, today)
-    if window == "evening":
-        # В 16:55 напоминаем только точкам с закрытием в 17:00; в 17:55 — до 18:00;
-        # в 18:55 — всем оставшимся, включая основной график до 19:00.
-        due_hour = 17 if (n.hour, n.minute) < (17, 0) else 18 if (n.hour, n.minute) < (18, 0) else 19
-        miss = sorted(s for s in expected - reported if STORE_CLOSE_HOUR.get(s, 19) <= due_hour)
-    else:
-        miss = sorted(expected - reported)
+    miss = sorted(expected - reported)
     if miss:
         shown = ", ".join(miss[:8])
         more = f" и ещё {len(miss) - 8}" if len(miss) > 8 else ""
@@ -2124,9 +1708,7 @@ async def run_slot(kind: str, fallback: bool, n: datetime) -> str:
         return "retry"
     text, html = None, False
     if kind == "greeting":
-        text = "☀️ Доброе утро, ОФ2! Удачной смены, сильных чеков и спокойной 1С. Поехали 🚀"
-    elif kind == "open":
-        text = open_text(n)
+        text = greeting_text(n)
     elif kind == "push":
         text = pick_bag("push", PUSH_MESSAGES)
     elif kind == "tips":
@@ -2137,25 +1719,10 @@ async def run_slot(kind: str, fallback: bool, n: datetime) -> str:
             return "skip"
     elif kind == "nudge_midday":
         text = missing_text("midday", n, "⏳ Обеденный отчёт")
-    elif kind == "nudge_evening_17":
-        text = missing_text("evening", n, "🕔 Закрытие точек до 17:00")
-    elif kind == "nudge_evening_18":
-        text = missing_text("evening", n, "🕕 Закрытие точек до 18:00")
-    elif kind == "nudge_evening_19":
-        text = missing_text("evening", n, "🌙 Вечерний отчёт (график до 19:00)")
     elif kind == "summary":
         today = biz_date(n)
         text = build_yesterday(today)
         html = text is not None
-    elif kind == "midday_stats":
-        ent = day_entries(biz_date(n).isoformat(), "midday")
-        ranked = sorted(((s, e["pct"]) for s, e in ent.items() if e.get("pct") is not None), key=lambda x: -x[1])
-        ranked = [r for r in ranked if r[1] >= 30][:3]
-        if len(ent) >= 8 and len(ranked) >= 2:
-            top = ", ".join(f"{escape(s)} ({pct_str(p)})" for s, p in ranked)
-            text = f"📈 К обеду впереди: {top}. Остальные, у вас вся вторая половина дня 😉"
-            html = True
-
     if text is None and (kind == "joke" or fallback):
         if jokes_temporarily_paused():
             return "retry"
@@ -2185,22 +1752,21 @@ async def tick() -> None:
         if n < start:
             continue
 
-        # Для шуток и совета: если руководитель не писал к плановому времени,
-        # ждём его сообщение и публикуем через 30 минут. Если он уже писал до слота,
-        # публикация остаётся по расписанию.
-        manager_delayed_slot = kind in ("joke", "tips")
-        if manager_delayed_slot:
-            manager_ts = RT.last_manager_message
-            if manager_ts <= 0:
-                continue
-            manager_dt = datetime.fromtimestamp(manager_ts, TZ)
-            if manager_dt.date() != n.date():
+        if kind == "joke":
+            # Шутка идёт по графику. Если руководитель недавно писал в чат, не перебиваем:
+            # публикуем через 30 минут после его сообщения (правило только для шуток).
+            if n > start + timedelta(minutes=JOKE_MAX_DELAY_MIN):
+                done.append(slot_id)
                 continue
             ready_at = start
-            if manager_dt > start:
-                ready_at = manager_dt + timedelta(minutes=30)
+            if RT.last_manager_message > 0:
+                manager_dt = datetime.fromtimestamp(RT.last_manager_message, TZ)
+                if manager_dt.date() == n.date():
+                    ready_at = max(start, manager_dt + timedelta(minutes=JOKE_AFTER_MANAGER_MIN))
             if n < ready_at:
                 continue
+            if time.time() - RT.last_bot < JOKE_MIN_GAP_MIN * 60:
+                continue                      # если шутки сдвинулись, не выдаём их подряд
         elif n > start + timedelta(minutes=SLOT_GRACE_MIN):
             done.append(slot_id)
             continue
