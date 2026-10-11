@@ -14,17 +14,7 @@ TOP TEAM - рабочий бот для чата 16 магазинов (Сота
   * напоминает, кто ещё не сдал утренний/обеденный отчёт
   * утром пишет итоги вчерашнего дня
   * пишет текстом до 19:00; вечерние отчёты и напоминания учитываются до закрытия магазинов
-  * молчит, когда в чате авария (1С, свет) или серьёзные темы (сборы, прощания)
   * имеет админ-панель в ЛС для Создателей и отшивает остальных сотрудников.
-
-Правила для руководителей и шуток (добавлено):
-  * шутки и советы бот пишет ТОЛЬКО после сдачи всех отчётов текущего окна; если отчёты задерживаются,
-    сначала напоминает отстающим (утро, обед и вечер), а затем ждёт фактической сдачи
-  * руководителям (HQ_USER_IDS + BOSS_USER_IDS) бот НИКОГДА не отвечает шутками - только положительные реакции
-    (Исключение: если руководитель пишет напрямую боту, бот пишет про сбой и уходит в мут на 30 минут)
-  * SILENT_USER_IDS (ᴋɴɴᴠsᴋʏ) - вообще никаких текстовых ответов, даже на фото, только реакции
-  * фото руководителя с похвалой (кредит/гарантия/флагман или положительные эмодзи) = чек сотрудника:
-    после 2 реакций коллег бот хвалит ПРОДАВЦА (а не руководителя), а также персонально обращается к Денису/Стелле.
 
 Запуск: python bot.py   (нужны переменные BOT_TOKEN и желательно CHAT_ID)
 """
@@ -68,7 +58,6 @@ except Exception:  # старые базы часовых поясов
 SPEAK_FROM = (7, 30)     # раньше этого времени бот не пишет текстом
 SPEAK_UNTIL = (19, 0)    # Обычные текстовые сообщения — до 19:00; финальное прощание имеет отдельное исключение
 REACT_AFTER_HOURS = True  # реакции на вечерние отчёты сохраняются; текст разрешён до 19:00
-SELF_SPAM_LIMIT = 4       # сколько сообщений бота подряд без ответа людей, потом пауза
 SLOT_GRACE_MIN = 25       # сколько минут после времени слота бот ещё может его выполнить
 PHOTO_REACTORS_NEEDED = 2  # сколько людей должны поставить 👍/🔥 на фото чека
 MAX_PRAISE_PER_DAY = 8
@@ -83,8 +72,6 @@ BOSS_MARKERS = ("гусев", "стелла яссин")
 SILENT_USER_IDS = {486540367}
 # Положительные реакции, которые бот ставит на сообщения руководителей
 MANAGER_REACTIONS = ["👍", "🔥", "🫡", "✍️", "🏆", "❤️", "🫡"]
-# Шутки/советы разрешены только когда все отчёты уже сданы. До этого времени проверяем утренние, после - обеденные.
-GATE_MIDDAY_FROM = (13, 30)
 
 # 16 магазинных аккаунтов, обнаруженных в истории чата. ID устойчивее имён.
 STORE_BY_USER_ID = {
@@ -181,7 +168,6 @@ class RT:
     last_human = 0.0
     last_bot = 0.0
     last_manager_message = 0.0
-    streak = 0
     mute_until = 0.0
     tech_at = 0.0
     last_tech_reply = 0.0
@@ -229,7 +215,6 @@ CHAT_HISTORY_DAYS = 90
 ISSUE_PATTERNS = {
     "1С / программы": re.compile(r"\b1\s*[сc]\b|программ\w*|баз\w* не груз|не открыва\w*|завис\w*|ошибк\w*", re.I),
     "Интернет / связь": re.compile(r"интернет|wi[ -]?fi|вай.?фай|связь|сеть не|нет сети|роутер|терминал не", re.I),
-    "Свет / электричество": re.compile(r"света нет|отключил\w* свет|электричеств\w*|свет отключ|генератор", re.I),
     "Отчётность": re.compile(r"не сдал\w*|не отправил\w*|забыл отправ\w*|опоздал с отч[её]т\w*|задерж\w* отч[её]т\w*|отч[её]т\w*.{0,25}(?:не приш[её]л|не сдал|не отправил|задерж|опоздал)", re.I),
     "Касса / оплата": re.compile(r"касс\w*|терминал|оплат\w* не проход|эквайринг|чек не печат", re.I),
     "Товар / остатки": re.compile(r"остатк\w*|нет в наличии|товар\w* нет|поставк\w*|перемещени\w*", re.I),
@@ -1311,12 +1296,7 @@ def in_joke_window(n: datetime) -> bool:
 
 def jokes_temporarily_paused() -> bool:
     return time.time() < RT.jokes_paused_until
-POWER_RE = re.compile(r"свет\s*[+\-]|генератор\s*[+\-]|світл\w*\s*[+\-]", re.IGNORECASE)
-SERIOUS_RE = re.compile(
-    r"бригад|броник|амуниц|\bкаска\b|збір\b|сбор\s+(?:средств|денег)|донат|\bвсу\b|\bзсу\b|загинул|загибл|погиб|"
-    r"прощан|похорон|светлая\s+память|вічна\s+пам|вечная\s+память|співчу|соболезн|\bумер(?:ла|ли|ший)?\b|\bпомер",
-    re.IGNORECASE,
-)
+
 FAREWELL_RE = re.compile(r"последн\w+\s+рабоч|остан\w+\s+робоч", re.IGNORECASE)
 GREET_RE = re.compile(r"доброе утро|доброго ранку|доброго дня|добрый день|добрий день|добрий ранок", re.IGNORECASE)
 BDAY_RE = re.compile(r"с\s+дн[её]м\s+рожд|з\s+дн[её]м\s+народж", re.IGNORECASE)
@@ -1328,8 +1308,6 @@ def can_speak(n: datetime, gap: bool = True, jokes: bool = False) -> bool:
         return False
     t = time.time()
     if t < RT.mute_until:
-        return False
-    if jokes and RT.streak >= SELF_SPAM_LIMIT:
         return False
     return True
 
@@ -1358,7 +1336,6 @@ async def say(text: str, msg: Message | None = None, html: bool = False, track_d
         log.warning("Не удалось отправить сообщение: %s", e)
         return False
     RT.last_bot = time.time()
-    RT.streak += 1
     return True
 
 
@@ -1412,7 +1389,7 @@ def joke_for(n: datetime) -> str:
 
 # ============================ ВОРОТА ДЛЯ ШУТОК И СОВЕТОВ ============================
 def gate_window(n: datetime) -> str:
-    """Окно отчётов для допуска к шуткам: утро, обед, затем вечер после 17:45."""
+    """Окно отчётов для допуска: утро, обед, затем вечер после 17:45."""
     minutes = n.hour * 60 + n.minute
     if minutes < GATE_MIDDAY_FROM[0] * 60 + GATE_MIDDAY_FROM[1]:
         return "morning"
@@ -1433,12 +1410,6 @@ def reports_complete(n: datetime):
     if len(reported) >= 16:
         return True, []
     return False, [f"мало данных: сдали {len(reported)} из 16"]
-
-
-def jokes_allowed(n: datetime) -> bool:
-    """Шутки/советы разрешены только после сдачи всех отчётов текущего окна."""
-    ok, _ = reports_complete(n)
-    return ok
 
 
 def open_is_generic(n: datetime) -> bool:
@@ -1837,8 +1808,6 @@ async def handle_private_message(message: Message) -> None:
         ent_d = day_entries(bd, "midday")
         ent_e = day_entries(bd, "evening")
         
-        ok_j, miss_j = reports_complete(now())
-        joke_gate = "разрешены (все отчёты на месте)" if ok_j else "ждём отчёты: " + escape(", ".join(miss_j[:6]))
         mute_status = "Выключен"
         if RT.mute_until > time.time():
             mute_status = datetime.fromtimestamp(RT.mute_until, TZ).strftime('%H:%M:%S')
@@ -1848,7 +1817,7 @@ async def handle_private_message(message: Message) -> None:
             f"🌅 Утро: {len(ent_m)} отчётов\n"
             f"☀️ Обед: {len(ent_d)} отчётов\n"
             f"🌙 Вечер: {len(ent_e)} отчётов\n\n"
-            f"🎭 Шутки и советы: {joke_gate}\n"
+            f"🎭 Шутки и советы: разрешены всегда (без привязки к отчётам)\n"
             f"🔇 Режим тишины активен до: {mute_status}",
             parse_mode="HTML"
         )
@@ -1956,7 +1925,6 @@ async def process(message: Message, edited: bool) -> None:
         if not edited:
             RT.last_human = time.time()
             RT.last_manager_message = time.time()
-            RT.streak = 0
         if directed_to_bot:
             reply_text = pick_bag("bot_mention_manager", SITUATIONS["bot_mention_manager"])
             if not is_silent(name, user.id) and can_speak(n, gap=False):
@@ -1967,8 +1935,6 @@ async def process(message: Message, edited: bool) -> None:
             await say(random.choice(TECH_REPLIES), message, track_deletable=True)
         if TECH_RE.search(low):
             RT.tech_at = time.time()
-        if SERIOUS_RE.search(low):
-            mute_for(180)
         if message.photo and not edited and not is_silent(name, user.id):
             caption = (message.caption or "").strip()
             if is_praise_caption(caption):
@@ -1982,17 +1948,12 @@ async def process(message: Message, edited: bool) -> None:
 
     if not edited:
         RT.last_human = time.time()
-        RT.streak = 0
 
     if FAREWELL_RE.search(low):
         await react(message, ["🫡", "🤗"])
         if can_speak(n, gap=False):
             await say(pick_bag("farewell", SITUATIONS["farewell"]), message)
         mute_for(30)
-        return
-
-    if SERIOUS_RE.search(low):
-        mute_for(180)
         return
 
     if low.startswith("/") and not edited:
@@ -2029,11 +1990,6 @@ async def process(message: Message, edited: bool) -> None:
     if not text:
         return
 
-    if POWER_RE.search(low):
-        mute_for(60)
-        await react(message, ["🫡"])
-        return
-
     if ONE_C_RE.search(text):
         RT.tech_at = time.time()
         await react(message, ["🗿", "🤡", "🙈", "🥱"])
@@ -2060,7 +2016,7 @@ async def process(message: Message, edited: bool) -> None:
 
     # ---- СОТРУДНИКИ И МАГАЗИНЫ: Ответ на тег / реплай ----
     if directed_to_bot and len(text) < 200:
-        if can_speak(n, gap=False) and jokes_allowed(n):
+        if can_speak(n, gap=False):
             is_store = (user.id in STORE_BY_USER_ID) or (user.id in PERSONAL_STORE_BY_USER_ID)
             if is_store:
                 reply_text = pick_bag("bot_mention_store", SITUATIONS["bot_mention_store"])
@@ -2076,7 +2032,7 @@ async def process(message: Message, edited: bool) -> None:
         r"красив\w+\s+чек|рекорд\w*|прогресс месяца|стажер\w*.*(удив|кредит|ультр)",
         re.IGNORECASE,
     )
-    if len(text) <= 220 and win_re.search(text) and not SERIOUS_RE.search(low) and not is_boss(name, user.id):
+    if len(text) <= 220 and win_re.search(text) and not is_boss(name, user.id):
         if can_speak(n, gap=False) and time.time() - RT.last_praise > 900 and RT.praise_n < MAX_PRAISE_PER_DAY:
             pool = [
                 "😎 Вот это апгрейд смены! Красиво, коллеги 🔥",
@@ -2170,12 +2126,8 @@ async def run_slot(kind: str, fallback: bool, n: datetime) -> str:
     if kind == "greeting":
         text = "☀️ Доброе утро, ОФ2! Удачной смены, сильных чеков и спокойной 1С. Поехали 🚀"
     elif kind == "open":
-        if open_is_generic(n) and not jokes_allowed(n):
-            return "retry"            # ждём, пока все сдадут отчёты (слот живёт ещё SLOT_GRACE_MIN минут)
         text = open_text(n)
     elif kind == "push":
-        if not jokes_allowed(n):
-            return "retry"
         text = pick_bag("push", PUSH_MESSAGES)
     elif kind == "tips":
         text = pick_bag("tips", JOKES["tips"])
@@ -2207,10 +2159,6 @@ async def run_slot(kind: str, fallback: bool, n: datetime) -> str:
     if text is None and (kind == "joke" or fallback):
         if jokes_temporarily_paused():
             return "retry"
-        if RT.streak >= SELF_SPAM_LIMIT:
-            return "skip"
-        if not jokes_allowed(n):
-            return "retry"            # не все отчёты на месте - шутки подождут
         text = joke_for(n)
         html = False
     if text is None:
