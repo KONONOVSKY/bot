@@ -68,9 +68,7 @@ except Exception:  # старые базы часовых поясов
 SPEAK_FROM = (7, 30)     # раньше этого времени бот не пишет текстом
 SPEAK_UNTIL = (19, 0)    # Обычные текстовые сообщения — до 19:00; финальное прощание имеет отдельное исключение
 REACT_AFTER_HOURS = True  # реакции на вечерние отчёты сохраняются; текст разрешён до 19:00
-MIN_GAP_MIN = 20          # минимум минут между самостоятельными сообщениями бота
 SELF_SPAM_LIMIT = 4       # сколько сообщений бота подряд без ответа людей, потом пауза
-HUMAN_BURST_SEC = 75      # если люди только что писали - не перебиваем
 SLOT_GRACE_MIN = 25       # сколько минут после времени слота бот ещё может его выполнить
 PHOTO_REACTORS_NEEDED = 2  # сколько людей должны поставить 👍/🔥 на фото чека
 MAX_PRAISE_PER_DAY = 8
@@ -182,6 +180,7 @@ class RT:
     """Оперативная память (не сохраняется)."""
     last_human = 0.0
     last_bot = 0.0
+    last_manager_message = 0.0
     streak = 0
     mute_until = 0.0
     tech_at = 0.0
@@ -197,7 +196,6 @@ class RT:
     sit_done: set = set()
     last_sit = 0.0
     bot_msgs: dict = {}  # Для отслеживания дизлайков на шутки
-    last_silence_joke = 0.0 # Для отслеживания шуток во время тишины
     boss_praise_toggle = False # Добавлен переключатель для Дениса и Стеллы
 
 
@@ -1308,9 +1306,8 @@ ONE_C_RE = re.compile(r"1\s?[сc]", re.IGNORECASE)
 TECH_FIXED_RE = re.compile(r"заработал|запрацював|уже\s+работает|вже\s+працює|всё\s+ок|все\s+ок", re.IGNORECASE)
 
 def in_joke_window(n: datetime) -> bool:
-    """Шутки разрешены только с 10:00 до 12:00 и с 14:00 до 16:00."""
-    minute = n.hour * 60 + n.minute
-    return 10 * 60 <= minute < 12 * 60 or 14 * 60 <= minute < 16 * 60
+    """Периоды для реакций/ответов, связанных с шутками; плановые публикации задаются в SLOTS."""
+    return 11 <= n.hour < 13 or 15 <= n.hour < 17
 
 def jokes_temporarily_paused() -> bool:
     return time.time() < RT.jokes_paused_until
@@ -1331,8 +1328,6 @@ def can_speak(n: datetime, gap: bool = True, jokes: bool = False) -> bool:
         return False
     t = time.time()
     if t < RT.mute_until:
-        return False
-    if gap and t - RT.last_bot < MIN_GAP_MIN * 60:
         return False
     if jokes and RT.streak >= SELF_SPAM_LIMIT:
         return False
@@ -1960,6 +1955,7 @@ async def process(message: Message, edited: bool) -> None:
         await react(message, MANAGER_REACTIONS)
         if not edited:
             RT.last_human = time.time()
+            RT.last_manager_message = time.time()
             RT.streak = 0
         if directed_to_bot:
             reply_text = pick_bag("bot_mention_manager", SITUATIONS["bot_mention_manager"])
@@ -2135,10 +2131,12 @@ SLOTS = [
     ("nudge_m", 8, 55, "nudge_morning", False),
     ("open", 9, 0, "open", False),
     ("sum", 9, 30, "summary", True),
-    ("j10", 10, 20, "joke", False),
-    ("tips", 12, 0, "tips", False),
+    ("tips", 10, 0, "tips", False),
+    ("j11", 11, 0, "joke", False),
+    ("j12", 12, 0, "joke", False),
     ("nudge_d", 13, 30, "nudge_midday", False),
-    ("j15", 15, 20, "joke", False),
+    ("j15", 15, 0, "joke", False),
+    ("j16", 16, 0, "joke", False),
     ("nudge_e17", 16, 55, "nudge_evening_17", False),
     ("push", 17, 45, "push", False),
     ("nudge_e18", 17, 55, "nudge_evening_18", False),
@@ -2168,9 +2166,6 @@ async def run_slot(kind: str, fallback: bool, n: datetime) -> str:
     jokes_kind = kind == "joke" or fallback
     if not can_speak(n, jokes=False):
         return "retry"
-    if time.time() - RT.last_human < HUMAN_BURST_SEC:
-        return "retry"
-
     text, html = None, False
     if kind == "greeting":
         text = "☀️ Доброе утро, ОФ2! Удачной смены, сильных чеков и спокойной 1С. Поехали 🚀"
@@ -2210,8 +2205,8 @@ async def run_slot(kind: str, fallback: bool, n: datetime) -> str:
             html = True
 
     if text is None and (kind == "joke" or fallback):
-        if not in_joke_window(n) or jokes_temporarily_paused():
-            return "skip"
+        if jokes_temporarily_paused():
+            return "retry"
         if RT.streak >= SELF_SPAM_LIMIT:
             return "skip"
         if not jokes_allowed(n):
@@ -2231,16 +2226,6 @@ async def tick() -> None:
     if not get_chat_id():
         return
         
-    current_time = time.time()
-
-    # - Проверка на тишину (более 1 часа) -
-    if in_speak_hours(n) and RT.last_human > 0:
-        if (current_time - RT.last_human > 3600) and (current_time - RT.last_silence_joke > 3600):
-            if RT.streak < SELF_SPAM_LIMIT and jokes_allowed(n) and in_joke_window(n) and not jokes_temporarily_paused():  # только заданные окна и без паузы
-                if await say(joke_for(n), html=False, track_deletable=True):
-                    RT.last_silence_joke = current_time
-    # -----------------------------------------
-
     today = n.date().isoformat()
     done = STATE["done"].setdefault(today, [])
     for old in sorted(STATE["done"])[:-3]:
@@ -2251,9 +2236,27 @@ async def tick() -> None:
         start = n.replace(hour=h, minute=m, second=0, microsecond=0)
         if n < start:
             continue
-        if n > start + timedelta(minutes=SLOT_GRACE_MIN):
+
+        # Для шуток и совета: если руководитель не писал к плановому времени,
+        # ждём его сообщение и публикуем через 30 минут. Если он уже писал до слота,
+        # публикация остаётся по расписанию.
+        manager_delayed_slot = kind in ("joke", "tips")
+        if manager_delayed_slot:
+            manager_ts = RT.last_manager_message
+            if manager_ts <= 0:
+                continue
+            manager_dt = datetime.fromtimestamp(manager_ts, TZ)
+            if manager_dt.date() != n.date():
+                continue
+            ready_at = start
+            if manager_dt > start:
+                ready_at = manager_dt + timedelta(minutes=30)
+            if n < ready_at:
+                continue
+        elif n > start + timedelta(minutes=SLOT_GRACE_MIN):
             done.append(slot_id)
             continue
+
         status = await run_slot(kind, fallback, n)
         if status in ("sent", "skip"):
             done.append(slot_id)
