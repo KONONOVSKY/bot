@@ -51,6 +51,9 @@ ADMIN_ID = 486540367 # Ваш ID для получения отчетов при
 HQ_USER_IDS = {486540367, 987578033}
 BOSS_USER_IDS = {394259493}
 HQ_MARKERS = ("ᴋɴɴᴠsᴋʏ", "knnvsky")
+BOT_NAME_MARKERS = ("смотрящий за оф2",)   # как бот подписан в истории чата
+HISTORY_DEBOUNCE_SEC = 4.0      # ждём остальные части длинной истории
+HISTORY_CONTINUE_SEC = 120.0    # в этом окне следующая часть считается продолжением
 BOSS_MARKERS = ("гусев", "стелла яссин")
 SILENT_USER_IDS = {486540367}
 MANAGER_REACTIONS = ["👍", "🔥", "🫡", "✍️", "🏆", "❤️", "🫡"]
@@ -67,7 +70,7 @@ STORE_BY_USER_ID = {
     6596253291: "Рабина Водафон",
     5288219863: "Белгород-Днестровский",
     7837076662: "Королёва Водафон",
-    6450083571: "Измаил Водфон",
+    6450083571: "Измаил Водафон",
     912622659: "Киевстар арнаутская",
     7743570275: "Королёва лайф",
     1314535620: "Измаил Киевстар",
@@ -79,6 +82,9 @@ ALIASES = {
     "русла́н черноморск": "Черноморск",
     "руслан черноморск": "Черноморск",
     "алина старосенная": "Старосенная Киевстар",
+    "измаил вф": "Измаил Водафон",
+    "измаил водфон": "Измаил Водафон",
+    "старосенная кс": "Старосенная Киевстар",
 }
 PERSONAL_STORE_BY_USER_ID = {
     1947381419: "Черноморск",       
@@ -127,7 +133,8 @@ def classify_window(dt: datetime) -> str:
     return "evening"
 
 # ============================ СОСТОЯНИЕ ============================
-STATE: dict = {"chat_id": None, "history": {}, "bags": {}, "done": {}, "staff_store": {}}
+STATE: dict = {"chat_id": None, "history": {}, "bags": {}, "done": {}, "staff_store": {},
+               "midday_motivation_sent": []}
 
 class RT:
     last_human = 0.0
@@ -144,6 +151,12 @@ class RT:
     is_suspended = True         
     awaiting_history = True     
     awaiting_confirmation = False
+    # Сборка истории, пришедшей несколькими сообщениями
+    hist_chunks: dict = {}
+    hist_last = 0.0
+    hist_gen = 0
+    bot_username = ""
+    bot_name_norm = ""
 
 def load_state() -> None:
     try:
@@ -151,10 +164,21 @@ def load_state() -> None:
             data = json.load(f)
         if isinstance(data, dict):
             STATE.update({k: data.get(k, STATE[k]) for k in STATE})
+            migrate_state()
     except FileNotFoundError:
         pass
     except Exception as e:
         log.warning("Не удалось прочитать состояние: %s", e)
+
+def migrate_state() -> None:
+    old, new = "Измаил Водфон", "Измаил Водафон"
+    for day in STATE.get("history", {}).values():
+        if old in day:
+            day.setdefault(new, day[old]); day.pop(old, None)
+    roster = STATE.get("staff_store", {})
+    for k, v in list(roster.items()):
+        if v == old:
+            roster[k] = new
 
 def save_state() -> None:
     try:
@@ -197,7 +221,7 @@ CAT_PATTERNS = {
     "aks": re.compile(r"^\W*(?:акс|аксы)\b\s*[:\-]?\s*(?P<rest>.*)$", re.IGNORECASE),
     "str": re.compile(r"^\W*(?:стр|страх|стрх)\b\s*[:\-]?\s*(?P<rest>.*)$", re.IGNORECASE),
     "trade": re.compile(r"^\W*(?:трейд|trade)\b\s*(?:ин)?\s*[:\-]?\s*(?P<rest>.*)$", re.IGNORECASE),
-    "credit": re.compile(r"^\W*(?:кредит|крдт|то\s+кредит)\b\s*[:\-]?\s*(?P<rest>.*)$", re.IGNORECASE),
+    "credit": re.compile(r"^\W*(?:кредит|крдт|то\s+(?:в\s+)?кредит)\b\s*[:\-]?\s*(?P<rest>.*)$", re.IGNORECASE),
 }
 
 SHIFT_RE = re.compile(r"на\s+(?:смене|зміні|змене)\s*[:\-]?\s*(?P<names>.+)", re.IGNORECASE | re.DOTALL)
@@ -228,7 +252,7 @@ def calc_pct(plan, fact, closed):
 
 def _extract_nums_from_rest(rest: str):
     closed = "+" in rest or bool(re.search(r"закр[иы]т", rest, re.IGNORECASE))
-    nums = [int(x) for x in re.findall(r"\d+", rest.replace(" ", ""))]
+    nums = [int(x) for x in re.findall(r"\d+", rest)]
     return nums, closed
 
 def parse_report(text: str):
@@ -320,9 +344,13 @@ def parse_report(text: str):
     
     return data
 
+_SMALLCAPS = str.maketrans({"ᴀ": "a", "ʙ": "b", "ᴄ": "c", "ᴅ": "d", "ᴇ": "e", "ꜰ": "f", "ɢ": "g", "ʜ": "h",
+                            "ɪ": "i", "ᴊ": "j", "ᴋ": "k", "ʟ": "l", "ᴍ": "m", "ɴ": "n", "ᴏ": "o", "ᴘ": "p",
+                            "ꞯ": "q", "ʀ": "r", "ꜱ": "s", "ᴛ": "t", "ᴜ": "u", "ᴠ": "v", "ᴡ": "w", "ʏ": "y", "ᴢ": "z"})
+
 def _norm_name(name: str) -> str:
     import unicodedata
-    value = unicodedata.normalize("NFKC", name or "").casefold().replace("ё", "е")
+    value = unicodedata.normalize("NFKC", name or "").translate(_SMALLCAPS).casefold().replace("ё", "е")
     value = re.sub(r"[^a-zа-яіїєґ0-9]+", " ", value)
     return " ".join(value.split())
 
@@ -346,6 +374,14 @@ def is_silent(name: str, user_id: int | None = None) -> bool:
         return True
     low = _norm_name(name)
     return any(_norm_name(k) in low for k in HQ_MARKERS)
+
+def is_bot_name(name: str) -> bool:
+    norm = _norm_name(name)
+    if not norm:
+        return False
+    if RT.bot_name_norm and norm == RT.bot_name_norm:
+        return True
+    return any(_norm_name(k) == norm for k in BOT_NAME_MARKERS)
 
 def store_name(name: str, user_id: int | None = None, report_text: str = "") -> str:
     if user_id is not None:
@@ -380,7 +416,8 @@ def store_name(name: str, user_id: int | None = None, report_text: str = "") -> 
         ("королева лайф", "Королёва лайф"),
         ("киевстар арнаутская", "Киевстар арнаутская"),
         ("измаил киевстар", "Измаил Киевстар"),
-        ("измаил Водафон", "Измаил Водафон"),
+        ("измаил водафон", "Измаил Водафон"),
+        ("измаил вф", "Измаил Водафон"),
         ("рабина водафон", "Рабина Водафон"),
         ("одесса рабина", "Одесса Рабина"),
     ]
@@ -771,6 +808,11 @@ def in_joke_window(n: datetime) -> bool:
 def jokes_temporarily_paused() -> bool:
     return time.time() < RT.jokes_paused_until
 
+def register_manager_activity(ts: float) -> None:
+    """Любое сообщение руководителя (текст, фото...) ставит шутки на паузу JOKE_AFTER_MANAGER_MIN минут."""
+    RT.last_manager_message = max(RT.last_manager_message, ts)
+    RT.jokes_paused_until = max(RT.jokes_paused_until, ts + JOKE_AFTER_MANAGER_MIN * 60)
+
 FAREWELL_RE = re.compile(r"последн\w+\s+рабоч|остан\w+\s+робоч", re.IGNORECASE)
 GREET_RE = re.compile(r"доброе утро|доброго ранку|доброго дня|добрый день|добрий день|добрий ранок", re.IGNORECASE)
 BDAY_RE = re.compile(r"с\s+дн[её]м\s+рожд|з\s+дн[её]м\s+народж", re.IGNORECASE)
@@ -939,6 +981,8 @@ async def handle_report(message: Message, store: str, window: str, rep: dict, dt
     if not expected or not expected.issubset(reported):
         return
 
+    if not can_speak(now()):
+        return
     sent_days = STATE.setdefault("midday_motivation_sent", [])
     if bd in sent_days:
         return
@@ -1043,7 +1087,7 @@ async def handle_command(message: Message, cmd: str) -> None:
     if cmd == "/help" or cmd == "/start":
         await say(HELP_TEXT, message)
     elif cmd == "/joke":
-        if time.time() - RT.last_bot > 120:
+        if time.time() - RT.last_bot > 120 and not jokes_temporarily_paused():
             await say(joke_for(n), message, track_deletable=True)
     elif cmd == "/top":
         start = today - timedelta(days=today.weekday())
@@ -1095,99 +1139,229 @@ KIND_NAMES = {
 }
 
 
+# ============================ ИМПОРТ ИСТОРИИ И ПЛАН ДНЯ ============================
+HISTORY_START = re.compile(r"^\[\d{1,2}\s+[а-яa-z]+\.?\s+\d{4}", re.IGNORECASE)
+CONFIRM_WORDS = ("ок", "ok", "да", "+", "работаем", "подтверждаю", "start", "/resume")
+
+
+def joke_window_end(start: datetime) -> datetime:
+    """Конец окна шуток: слоты 11/12 -> 13:00, слоты 15/16 -> 17:00."""
+    return start.replace(hour=13 if start.hour < 13 else 17, minute=0, second=0, microsecond=0)
+
+
+def mark_slot_done(done: list, slot_id: str) -> None:
+    """Отметить слот выполненным. Для шутки — ещё и все более ранние шутки (чтобы не слать «долги» подряд)."""
+    if slot_id not in done:
+        done.append(slot_id)
+    kind = next((k for sid, _, _, k, _ in SLOTS if sid == slot_id), None)
+    if kind == "joke":
+        for sid, _, _, k, _ in SLOTS:
+            if sid == slot_id:
+                break
+            if k == "joke" and sid not in done:
+                done.append(sid)
+
+
+def sync_done_from_bot_messages(n: datetime, bot_times: list) -> list:
+    """Сопоставляем собственные сообщения бота из истории со слотами сегодняшнего дня."""
+    done = STATE["done"].setdefault(n.date().isoformat(), [])
+    for t in sorted(bot_times):
+        if t.date() != n.date():
+            continue
+        best = None
+        for slot_id, h, m, kind, _ in SLOTS:
+            if slot_id in done:
+                continue
+            start = t.replace(hour=h, minute=m, second=0, microsecond=0)
+            limit = JOKE_MAX_DELAY_MIN if kind == "joke" else SLOT_GRACE_MIN
+            if start <= t <= start + timedelta(minutes=limit):
+                best = slot_id          # последний подходящий = самый поздний стартовавший
+        if best:
+            mark_slot_done(done, best)
+    return done
+
+
+def import_history_text(text: str, n: datetime):
+    parsed = 0
+    latest = None
+    latest_author = ("", False)
+    unknown: set = set()
+    bot_slot_times: list = []
+    bot_all: list = []
+    last_mgr = None
+
+    for block in HISTORY_SPLIT.split(text):
+        block = block.strip()
+        if not block:
+            continue
+        m = HISTORY_HEAD.match(block)
+        if not m:
+            continue
+        day_str, mon_str, year_str, hh_str, mm_str, raw_name, msg_text = m.groups()
+        is_reply = " в ответ " in raw_name
+        name = raw_name.split(" в ответ ")[0].strip()
+        mon = next((v for k, v in MONTHS_MAP.items() if mon_str.lower().startswith(k)), None)
+        if mon is None:
+            continue
+        try:
+            dt = datetime(int(year_str), mon, int(day_str), int(hh_str), int(mm_str), tzinfo=TZ)
+        except ValueError:
+            continue
+
+        bot_msg = is_bot_name(name)
+        mgr_msg = (not bot_msg) and is_manager(name)
+        if latest is None or dt >= latest:
+            latest, latest_author = dt, (name, mgr_msg)
+
+        if bot_msg:
+            # сообщения самого бота: НЕ отчёты (раньше цитаты в «в ответ» превращались в фейковые отчёты)
+            bot_all.append(dt)
+            if not is_reply:
+                bot_slot_times.append(dt)
+            continue
+        if mgr_msg:
+            if last_mgr is None or dt >= last_mgr[0]:
+                last_mgr = (dt, name)
+            continue
+
+        rep = parse_report(msg_text)
+        if not rep:
+            continue
+        store = store_name(name, None, msg_text)
+        if store not in STORE_NAMES:
+            unknown.add(name)
+            continue
+        record_report(store, classify_window(dt), dt, rep)
+        parsed += 1
+
+    if latest is None:
+        return None
+    if bot_all:
+        RT.last_bot = max(RT.last_bot, max(bot_all).timestamp())
+    if last_mgr:
+        register_manager_activity(last_mgr[0].timestamp())
+    sync_done_from_bot_messages(n, bot_slot_times)
+    save_state()
+    return {"parsed": parsed, "latest": latest, "author": latest_author,
+            "last_mgr": last_mgr, "unknown": sorted(unknown)}
+
+
+def build_plan(n: datetime) -> str:
+    done = STATE["done"].get(n.date().isoformat(), [])
+    paused = datetime.fromtimestamp(RT.jokes_paused_until, TZ) if RT.jokes_paused_until else None
+    gap = datetime.fromtimestamp(RT.last_bot + JOKE_MIN_GAP_MIN * 60, TZ) if RT.last_bot else None
+    lines = []
+    for slot_id, h, minute, kind, _ in SLOTS:
+        if slot_id in done:
+            continue
+        start = n.replace(hour=h, minute=minute, second=0, microsecond=0)
+        title = KIND_NAMES.get(kind, kind)
+        if kind == "joke":
+            end = min(start + timedelta(minutes=JOKE_MAX_DELAY_MIN), joke_window_end(start))
+            at, note = max(start, n), ""
+            if paused and paused > at:
+                at, note = paused, " (пауза 30 мин после руководителя)"
+            if gap and gap > at:
+                at = gap
+            if at >= end:
+                continue
+            lines.append(f"• {at:%H:%M} — {title}{note}")
+        else:
+            if n > start + timedelta(minutes=SLOT_GRACE_MIN):
+                continue
+            lines.append(f"• {max(start, n):%H:%M} — {title}")
+    return "\n".join(lines) if lines else "На сегодня больше плановых задач нет."
+
+
+def force_resume(n: datetime) -> None:
+    """Принудительный старт без истории: всё, что уже должно было уйти, считаем отправленным (без спама)."""
+    done = STATE["done"].setdefault(n.date().isoformat(), [])
+    for slot_id, h, minute, _, _ in SLOTS:
+        if n.replace(hour=h, minute=minute, second=0, microsecond=0) <= n:
+            mark_slot_done(done, slot_id)
+    save_state()
+    RT.is_suspended = False
+    RT.awaiting_history = False
+    RT.awaiting_confirmation = False
+
+
+async def _finalize_history(reply_to: Message, gen: int) -> None:
+    try:
+        await asyncio.sleep(HISTORY_DEBOUNCE_SEC)
+        if gen != RT.hist_gen:          # пришла ещё одна часть — ждём её
+            return
+        text = "\n".join(RT.hist_chunks[k] for k in sorted(RT.hist_chunks))
+        n = now()
+        res = import_history_text(text, n)
+        if not res:
+            await reply_to.reply("❌ Не смог распознать сообщения в формате истории.")
+            return
+        if RT.is_suspended:
+            RT.awaiting_history = False
+            RT.awaiting_confirmation = True
+            tail = "⏳ Напиши <b>ок</b> или <b>да</b>, чтобы я перешел в автономный рабочий режим."
+        else:
+            tail = "▶️ Бот уже работает, график скорректирован."
+        author, author_mgr = res["author"]
+        lines = [
+            "✅ <b>История чата загружена!</b>",
+            f"Частей получено: {len(RT.hist_chunks)}. Найдено отчётов: {res['parsed']}.",
+            f"Синхронизировано до: {res['latest']:%d.%m %H:%M}.",
+            f"Последним писал: {escape(author)}{' (руководитель)' if author_mgr else ''}.",
+        ]
+        if res["last_mgr"]:
+            mdt, mname = res["last_mgr"]
+            until = datetime.fromtimestamp(RT.jokes_paused_until, TZ)
+            lines.append(f"Руководитель ({escape(mname)}) писал в {mdt:%d.%m %H:%M}: "
+                         + (f"шутки не раньше {until:%H:%M}." if until > n else "пауза 30 мин уже прошла."))
+        if res["unknown"]:
+            lines.append("⚠️ Не опознал точки (пропущены): " + escape(", ".join(res["unknown"])))
+        lines += ["", "📋 <b>План действий на остаток дня:</b>", build_plan(n), "", tail]
+        await reply_to.reply("\n".join(lines), parse_mode="HTML")
+    except Exception:
+        log.exception("Ошибка импорта истории")
+
+
 # ============================ ОБРАБОТЧИК ЛИЧНЫХ СООБЩЕНИЙ ============================
 async def handle_private_message(message: Message) -> None:
     user = message.from_user
     text = (message.text or "").strip()
     low = text.lower()
-    
-    # 0. Перехват подтверждения от Админа на запуск
-    if RT.awaiting_confirmation and user and user.id == ADMIN_ID:
-        if low in ("ок", "да", "+", "работаем", "подтверждаю", "start", "/resume"):
-            RT.is_suspended = False
-            RT.awaiting_confirmation = False
-            await message.reply("🚀 <b>Подтверждение получено.</b> Перехожу в автономный режим, работаю по графику.", parse_mode="HTML")
-            return
-            
-    # Принудительный старт (пропуск истории)
-    if low == "/resume" and user and user.id == ADMIN_ID:
-        RT.is_suspended = False
-        RT.awaiting_history = False
-        RT.awaiting_confirmation = False
-        await message.reply("🚀 Автономный режим активирован принудительно. Я вернулся в строй.")
-        return
-        
-    # 1. Если Создатель сбрасывает историю чата
-    if user and user.id == ADMIN_ID and text.startswith("[") and "]" in text and ":" in text:
-        blocks = HISTORY_SPLIT.split(text)
-        parsed_count = 0
-        latest_dt = None
-        
-        for block in blocks:
-            block = block.strip()
-            if not block: continue
-            
-            m = HISTORY_HEAD.match(block)
-            if not m: continue
-            
-            day_str, mon_str, year_str, hh_str, mm_str, raw_name, msg_text = m.groups()
-            name = raw_name.split(" в ответ ")[0].strip()
-            
-            mon = 1
-            for k, v in MONTHS_MAP.items():
-                if mon_str.lower().startswith(k):
-                    mon = v
-                    break
-            try:
-                dt = datetime(int(year_str), mon, int(day_str), int(hh_str), int(mm_str), tzinfo=TZ)
-            except ValueError:
-                continue
-                
-            if not latest_dt or dt > latest_dt:
-                latest_dt = dt
-                
-            rep = parse_report(msg_text)
-            if rep:
-                store = store_name(name, None, msg_text)
-                record_report(store, classify_window(dt), dt, rep)
-                parsed_count += 1
-                
-        if latest_dt:
-            n = now()
-            today_str = n.date().isoformat()
-            done = STATE["done"].setdefault(today_str, [])
-            upcoming = []
-            
-            # Обновляем тайминги и генерируем план на остаток дня
-            for slot_id, h, minute, kind, _ in SLOTS:
-                slot_dt = n.replace(hour=h, minute=minute, second=0, microsecond=0)
-                # Если слот уже в прошлом (по времени истории или текущему), отмечаем как "сделанный"
-                if latest_dt > slot_dt and slot_id not in done:
-                    done.append(slot_id)
-                    
-                # Формируем список того, что еще предстоит отправить сегодня
-                if slot_id not in done:
-                    # Если время слота еще в будущем, или он был недавно (в пределах GRACE_MIN)
-                    if slot_dt >= n or (n - slot_dt).total_seconds() <= SLOT_GRACE_MIN * 60:
-                        name_ru = KIND_NAMES.get(kind, kind)
-                        upcoming.append(f"• {h:02d}:{minute:02d} — {name_ru}")
+    is_admin = bool(user and user.id == ADMIN_ID)
 
-            save_state()
-            plan_text = "\n".join(upcoming) if upcoming else "На сегодня больше плановых задач нет."
-            
-            RT.awaiting_history = False
-            RT.awaiting_confirmation = True
-            
-            await message.reply(f"✅ <b>История чата загружена!</b>\n"
-                                f"Найдено отчётов: {parsed_count}.\n"
-                                f"Синхронизировано до: {latest_dt.strftime('%d.%m %H:%M')}.\n\n"
-                                f"📋 <b>План действий на остаток дня:</b>\n"
-                                f"{plan_text}\n\n"
-                                f"⏳ Напиши <b>ок</b> или <b>да</b>, чтобы я перешел в автономный рабочий режим.", 
-                                parse_mode="HTML")
-        else:
-            await message.reply("❌ Не смог распознать сообщения в формате истории.")
+    # 0. Подтверждение запуска от Админа
+    if is_admin and RT.awaiting_confirmation and low in CONFIRM_WORDS:
+        RT.is_suspended = False
+        RT.awaiting_confirmation = False
+        await message.reply("🚀 <b>Подтверждение получено.</b> Перехожу в автономный режим, работаю по графику.", parse_mode="HTML")
         return
+
+    # Принудительный старт (без истории)
+    if is_admin and low == "/resume":
+        n = now()
+        force_resume(n)
+        await message.reply("🚀 Автономный режим активирован принудительно. Слоты, время которых уже прошло, "
+                            "считаю отправленными.\n\n📋 План на остаток дня:\n" + build_plan(n))
+        return
+
+    # 1. История чата от Админа. Длинная история приходит несколькими сообщениями (лимит Telegram 4096) —
+    #    собираем все части и разбираем одним куском после паузы.
+    if is_admin and text:
+        fresh = bool(HISTORY_START.match(text)) and ":" in text
+        cont = bool(RT.hist_chunks) and (time.time() - RT.hist_last < HISTORY_CONTINUE_SEC) \
+            and not text.startswith("/") and low not in CONFIRM_WORDS
+        if fresh or cont:
+            if fresh and not cont:
+                RT.hist_chunks = {}
+            RT.hist_chunks[message.message_id] = text
+            RT.hist_last = time.time()
+            RT.hist_gen += 1
+            asyncio.create_task(_finalize_history(message, RT.hist_gen))
+            return
+        if RT.awaiting_history and RT.is_suspended and not text.startswith("/"):
+            await message.reply("Жду историю чата (текст, начинающийся с [дата время] имя: ...) "
+                                "или /resume для принудительного старта.")
+            return
 
     # 2. Обычные ответы в ЛС
     if user and user.id not in HQ_USER_IDS and is_manager(user.full_name or "", user.id):
@@ -1196,7 +1370,7 @@ async def handle_private_message(message: Message) -> None:
         return
 
     if not user or user.id not in HQ_USER_IDS:
-        is_store = (user.id in STORE_BY_USER_ID) or (user.id in PERSONAL_STORE_BY_USER_ID)
+        is_store = bool(user) and ((user.id in STORE_BY_USER_ID) or (user.id in PERSONAL_STORE_BY_USER_ID))
         if is_store:
             reply_text = pick_bag("bot_mention_store", SITUATIONS["bot_mention_store"])
         else:
@@ -1314,13 +1488,15 @@ async def process(message: Message, edited: bool) -> None:
 
     is_bot_reply = message.reply_to_message and getattr(message.reply_to_message.from_user, "id", None) == bot.id
     has_bot_mention = re.search(r"\b(бот|бота|боту|ботяра)\b", low)
+    if not has_bot_mention and RT.bot_username and ("@" + RT.bot_username.lower()) in low:
+        has_bot_mention = True
     directed_to_bot = (is_bot_reply or has_bot_mention)
 
     if is_manager(name, user.id):
         await react(message, MANAGER_REACTIONS)
         if not edited:
             RT.last_human = time.time()
-            RT.last_manager_message = time.time()
+            register_manager_activity(time.time())
         if directed_to_bot:
             reply_text = pick_bag("bot_mention_manager", SITUATIONS["bot_mention_manager"])
             if not is_silent(name, user.id) and can_speak(n, gap=False) and not RT.is_suspended:
@@ -1491,15 +1667,12 @@ async def tick() -> None:
             continue
 
         if kind == "joke":
-            if n > start + timedelta(minutes=JOKE_MAX_DELAY_MIN):
+            # шутка живёт не дольше JOKE_MAX_DELAY_MIN и не выходит за окно 11-13 / 15-17
+            if n >= min(start + timedelta(minutes=JOKE_MAX_DELAY_MIN), joke_window_end(start)):
                 done.append(slot_id)
                 continue
-            ready_at = start
-            if RT.last_manager_message > 0:
-                manager_dt = datetime.fromtimestamp(RT.last_manager_message, TZ)
-                if manager_dt.date() == n.date():
-                    ready_at = max(start, manager_dt + timedelta(minutes=JOKE_AFTER_MANAGER_MIN))
-            if n < ready_at:
+            # пауза 30 мин после последнего сообщения руководителя (в т.ч. из загруженной истории)
+            if jokes_temporarily_paused():
                 continue
             if time.time() - RT.last_bot < JOKE_MIN_GAP_MIN * 60:
                 continue                      
@@ -1509,7 +1682,7 @@ async def tick() -> None:
 
         status = await run_slot(kind, fallback, n)
         if status in ("sent", "skip"):
-            done.append(slot_id)
+            mark_slot_done(done, slot_id)
             save_state()
             break  
         if status == "retry":
@@ -1545,6 +1718,12 @@ async def main() -> None:
     RT.last_human = time.time()
     await bot.delete_webhook(drop_pending_updates=True)
     await start_keepalive_server()
+    try:
+        me = await bot.get_me()
+        RT.bot_username = me.username or ""
+        RT.bot_name_norm = _norm_name(me.full_name)
+    except Exception as e:
+        log.warning("get_me не удался: %s", e)
     asyncio.create_task(scheduler_loop())
     log.info("Бот запущен. Время в Одессе: %s", now().strftime("%Y-%m-%d %H:%M"))
     
