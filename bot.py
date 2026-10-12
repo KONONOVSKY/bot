@@ -128,6 +128,17 @@ def in_speak_hours(n: datetime) -> bool:
     cur = (n.hour, n.minute)
     return SPEAK_FROM <= cur < SPEAK_UNTIL
 
+
+def wall_now() -> datetime:
+    """Реальное локальное время Киева/Одессы, не подменяется TEST_MODE."""
+    return datetime.now(TZ)
+
+
+def is_after_hard_mute() -> bool:
+    """Жёсткий запрет текстовых сообщений в рабочий чат с 19:00 включительно."""
+    current = wall_now()
+    return (current.hour, current.minute) >= SPEAK_UNTIL
+
 def classify_window(dt: datetime) -> str:
     minutes = dt.hour * 60 + dt.minute
     if dt.hour < 3:
@@ -858,6 +869,10 @@ def can_speak(n: datetime, gap: bool = True, jokes: bool = False, ignore_mute: b
 
 async def say(text: str, msg: Message | None = None, html: bool = False, track_deletable: bool = False) -> bool:
     kwargs = {"parse_mode": "HTML"} if html else {}
+    # Жёсткий мут применяется к сообщениям в группах, но не к личным ответам администратору.
+    if msg is not None and msg.chat.type in ("group", "supergroup") and is_after_hard_mute():
+        log.info("Жёсткий мут: ответ в рабочую группу отменён после 19:00.")
+        return False
     try:
         if msg is not None:
             sent = await msg.reply(text, **kwargs)
@@ -937,7 +952,11 @@ async def mirror_to_admin(sent: Message, text: str | None = None) -> None:
 
 
 async def send_chat_message(chat_id: int, text: str, **kwargs) -> Message | None:
-    """Отправить сообщение в рабочую группу и сразу поставить его на модерацию администратору."""
+    """Отправить сообщение в рабочую группу; после 19:00 действует жёсткий мут."""
+    # Этот шлюз закрывает плановые, внеплановые и ручные публикации в рабочую группу.
+    if is_allowed_chat(chat_id) and is_after_hard_mute():
+        log.info("Жёсткий мут: отправка в рабочую группу %s отменена после 19:00.", chat_id)
+        return None
     try:
         sent = await bot.send_message(chat_id, text, **kwargs)
     except TelegramRetryAfter as e:
@@ -951,8 +970,11 @@ async def send_chat_message(chat_id: int, text: str, **kwargs) -> Message | None
     return sent
 
 
-async def reply_and_mirror(message: Message, text: str, **kwargs) -> Message:
-    """Ответ на сообщение в группе с дублированием админу."""
+async def reply_and_mirror(message: Message, text: str, **kwargs) -> Message | None:
+    """Ответ на сообщение в группе с дублированием админу, если не действует жёсткий мут."""
+    if message.chat.type in ("group", "supergroup") and is_after_hard_mute():
+        log.info("Жёсткий мут: ответ в группе отменён после 19:00.")
+        return None
     sent = await message.reply(text, **kwargs)
     RT.last_bot = time.time()
     if sent.chat.type in ("group", "supergroup"):
@@ -1549,6 +1571,7 @@ def admin_panel_text(note: str | None = None) -> str:
         "",
         "Команды: /stats, /missing, /say текст, /joke, /mute 120, /unmute, /state, /resume",
         "Историю чата можно отправить сюда сообщениями из экспорта Telegram.",
+        "🔇 Жёсткий мут: бот не публикует текст в рабочем чате с 19:00 включительно; личное управление админом остаётся доступным.",
     ]
     if note:
         parts = [note, ""] + parts
@@ -1942,6 +1965,9 @@ def missing_text(window: str, n: datetime, label: str):
 async def maybe_send_midday_result(n: datetime | None = None) -> bool:
     """После слота 13:30 ждёт все 16 обеденных отчётов и публикует итог ровно один раз в день."""
     n = n or now()
+    # Не отправлять просроченный обеденный итог при возобновлении работы вечером.
+    if is_after_hard_mute():
+        return False
     if RT.is_suspended or (n.hour, n.minute) < (13, 30):
         return False
     date_key = biz_date(n).isoformat()
