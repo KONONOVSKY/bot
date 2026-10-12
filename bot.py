@@ -6,20 +6,26 @@ TOP TEAM - рабочий бот для чата 16 магазинов (Сота
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
 import random
 import re
+import secrets
 import time
 from datetime import date, datetime, timedelta
-from html import escape
+from difflib import SequenceMatcher
+from html import escape, unescape
 from statistics import mean
 from zoneinfo import ZoneInfo
 
 from aiogram import Bot, Dispatcher
 from aiogram.exceptions import TelegramRetryAfter
-from aiogram.types import Message, MessageReactionUpdated, ReactionTypeEmoji, BufferedInputFile
+from aiogram.types import (
+    Message, MessageReactionUpdated, ReactionTypeEmoji, BufferedInputFile,
+    InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery,
+)
 from aiohttp import web
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -133,8 +139,12 @@ def classify_window(dt: datetime) -> str:
     return "evening"
 
 # ============================ СОСТОЯНИЕ ============================
-STATE: dict = {"chat_id": None, "history": {}, "bags": {}, "done": {}, "staff_store": {},
-               "midday_motivation_sent": []}
+STATE: dict = {
+    "chat_id": None, "history": {}, "bags": {}, "done": {}, "staff_store": {},
+    "jokes_used": [], "queued_joke": None, "review_pending": {},
+    "midday_phrases_used": [], "midday_result_sent": {},
+    "tech_reply_date": "",
+}
 
 class RT:
     last_human = 0.0
@@ -496,20 +506,6 @@ def evening_stats(dates: list) -> dict:
                 res.setdefault(s, []).append((d, e["pct"]))
     return res
 
-def build_yesterday(today: date):
-    y = (today - timedelta(days=1)).isoformat()
-    ev = day_entries(y, "evening")
-    ranked = sorted(((s, e["pct"]) for s, e in ev.items() if e.get("pct") is not None), key=lambda x: -x[1])
-    if len(ranked) < 8:
-        return None
-    closed = sum(1 for _, p in ranked if p >= 100)
-    medals = ["🥇", "🥈", "🥉"]
-    lines = [f"📊 <b>Итоги вчера:</b> вечерний отчёт сдали {len(ev)} точек, план закрыли {closed}."]
-    for i, (s, p) in enumerate(ranked[:3]):
-        lines.append(f"{medals[i]} {escape(s)} - {pct_str(p)}")
-    lines.append("Сегодня берём новые высоты 💪")
-    return "\n".join(lines)
-
 # ============================ БАНК ФРАЗ ============================
 JOKES = {
     "general": [
@@ -527,7 +523,7 @@ JOKES = {
         "😎 Не каждый герой носит плащ, но некоторые умеют перенести контакты за 4000.",
         "👁 Стелла учила держать зрительный контакт. Клиент уже моргает морзянкой о помощи, но ты продолжаешь продавать ему услуги.",
         "🥊 Гусев может дожать на рассрочку с допами даже неработающий банкомат.",
-        "🎭 Продавец ОФ2 — это актер, который отыгрывает перемещение со склада достовернее, чем Ди Каприо в фильмах.",
+        "🎭 Продавец ОФ2 — это актер, который отыгрывает перемещение со склада запакованного смартфона достовернее, чем Ди Каприо в фильмах.",
         "📞 Если Юлия Марко звонит и ласково говорит «доброе утро», значит, твой чек на 100к прошел как возврат чехла. Беги.",
         "💔 Мы с 1С - классический пример red flag. Она постоянно меня бросает, а я всё равно к ней возвращаюсь каждую смену.",
         "📱POV: ты пообещал клиенту телефон со склада за 5 минут, но Артамонов ушёл на обед, и теперь ты просто стоишь в подсобке и смотришь в стену.",
@@ -540,16 +536,13 @@ JOKES = {
         "🛡Клиент: «А почему настройка стоит как половина телефона?». Ты: «Потому что мы ОФ2, мы не настраиваем, мы дарим цифровое бессмертие».",
         "😀Стелла нас учит продавать, Денис - дожимать, а Юлия Марко - никогда, слышишь, НИКОГДА не ошибаться в кнопках 1С.",
         "🫣Ты можешь быть гением продаж, закрывать кредиты пачками, но для Юлии Марко ты просто человек, который опять не ту кнопку нажал.",
-        "👀Чувствуешь холодок по спине? Это не кондиционер, это Боляк подключился к вашей камера.",
+        "👀Чувствуешь холодок по спине? Это не кондиционер, это Боляк подключился к вашей камере.",
         "☕️Легенда гласит, что между Королёва Киевстар, Королёва Водафон и Королёва Лайф есть секретный подземный тоннель, чтобы бегать за товаром и на кофебрейк в обход камер",
         "💪Если ты выжил на Добровольского 137, скрипты продаж тебе больше не нужны — ты сам можешь написать книгу по жестким продажам.",
         "🚗 Клиент на Осипова 25 торгуется за 50 гривен, хотя приехал на новом Порше, провели чек на страховку его Порше",
-        "✨Черноморск — это отдельное государство. Пока Юлия Марко дозванивается туда из-за ошибки в чеке на 50к, они уже успевают закрыть смену и уйти праздновать выполнения планов.",
+        "✨Черноморск — это отдельное государство. Пока бухгалтерия дозванивается туда из-за ошибки в чеке на 50к, они уже успевают закрыть смену и уйти праздновать выполнения планов.",
         "✨Когда 1С висит в Белгород-Днестровском, команда просто смотрит на лиман и ловят дзен, потому-что в таргете кредит уже одобрен.",
         "✨Глушко 14 — это место, где воздух пропитан успехом и ожиданием ответа от банков в таргете на 50к товарооборота",
-        "✨Осипова 25 — центр города, центр драмы. Когда Боляк подключается к их камерам, он берет попкорн.",
-        "👀Чувствуешь холодок по спине? Это не кондиционер, это Боляк подключился к вашей камера.",
-        "😨Когда в магазин заходит Боляк, даже 1С начинает работать быстрее от страха.",
         "👥ОФ2 - это филиал, где воздух стоит дороже смартфона.",
         "☕️Тот момент, когда ты гениально продал сервис на 5к, но получил ш.с. от видеонаблюдения за стаканчик кофе на витрине.",
         "🫣Секрет высокой доли сервиса в ОФ2: мы просто умеем очень драматично вздыхать, глядя в экран клиентского телефона.",
@@ -563,13 +556,11 @@ JOKES = {
         "✨В Измаиле если чек меньше 10к, клиенты извиняются.",
         "✨На Королёва работа с возражениями достигает таких масштабов, что клиенты уходят с утюгом вместо телефона.",
         "✨Старосенная — место, где клиенты настолько спешат, что подписывают договор рассрочки, думая, что это расписание автобусов.",
-        "👀Чувствуешь холодок по спине? Это не кондиционер, это Боляк подключился к вашей камера.",
-        "👀Чувствуешь холодок по спине? Это не кондиционер, это Боляк подключился к вашей камера.",
         "😀POV: ты так виртуозно посчитал сумму на 10 платежей, что клиент реально думает, будто это МЫ ему доплачиваем.",
-        "😴Тот самый вайб, когда Артамонов мгновенно провел перемещение, 1С не зависла, Боляк не смотрит, а Марко в отпуске. Жаль, что это только сон.",
+        "😴Тот самый вайб, когда Артамонов мгновенно провел перемещение, 1С не зависла, планы закрыли, Боляк не смотрит, а Марко в отпуске. Жаль, что это только сон.",
         "😁Когда банк отклонил рассрочку, а ты смотришь на клиента взглядом «ну всё, ты для меня умер, уходи».",
         "😁Если клиент говорит 'я подумаю', ты просто блокируешь выход из магазина, пока Гусев не приедет.",
-        "💰'Они не хотят в кредит' - у нас не любят эту фразу, поэтому просто берем паспорт и начинаем оформлять молча.",
+        "💰'Они не хотят в кредит' - у нас не любят эту фразу, поэтому просто молча берем паспорт и начинаем оформлять.",
         "🥷Говорят, Гусев придумал свои скрипты после того, когда обрабатал возражения Юлии Марко за неправильно проведённый чек.",
         "💅Стелла гордится, когда ты находишь у клиента вирус даже в коробке нового нераспакованного телефона",
         "💰У клиента нет денег даже на проезд, а ты уже оформляешь ему S26 Ultra на 10 платежей. Это база.",
@@ -587,49 +578,50 @@ JOKES = {
         "😀Когда клиент спрашивает, зачем ему страховка на чехол, ты включаешь режим Стеллы и с полным пониманием объясняешь про квантовую физику падений.",
         "😀Артамонов делает перемещение так долго, что клиент успевает оформить кредит, закрыть его, родить детей и отправить их в школу.",
         "😇Если КРО не нашли нарушений по видеонаблюдению, проверь пульс. Возможно, ты уже в раю для продавцов ОФ2.",
-        "🙅‍♀️Продать телефон без сервиса в ОФ2 - это red flag, после которого Стелла лично удалит тебя из друзей.",
+        "🙅‍♀️Продать телефон без сервиса в ОФ2 - это red flag, после которого Стелла лично удалит тебя из чата.",
         "📈 Не всё решается одним большим чеком. Иногда день собирается из маленьких удачных карасиков.",
         "🪫 Клиент пришёл с 2% батареи, поставил ему безлимитную лицензию, как Стелла учила.",
-    ],
-    "lunch": [
-        "🥪 Лучший момент для визита клиента - когда вы только ушли на обед.",
-    ],
-    "tips": [
         "💡 Совет дня: Если обещаете клиенту телефон со склада за 2 минуты — сразу заваривайте себе чай. Артамонов в Киеве еще даже не открыл 1С.",
         "⚡ Читкод: Если Артамонов не отвечает 20 минут, напишите ему, что Боляк пришел проверять остатки. Перемещение прилетит со скоростью света.",
         "🤡 Закон подлости: Если перемещение от Артамонова прошло мгновенно — не радуйтесь. Значит, сейчас зависнет 1С.",
-        "🏃‍♂️ Выживание: Если вы вчера провели легендарный чек с в кредит, к страховке добавили трейд-ин, но всё это клиент оплатил наличными, и вам сегодня звонит бухгалтерия — просто меняйте симку, бросайте бейдж и уезжайте из Одессы.",
+        "🏃‍♂️ Выживание: Если вы вчера провели легендарный чек в кредит, к страховке добавили трейд-ин, но всё это клиент оплатил наличными, и вам сегодня звонит бухгалтерия — просто меняйте симку, бросайте бейдж и уезжайте из Одессы.",
         "💡 Совет дня: если 1С зависла прямо во время оплаты, не паникуйте. Включайте режим NPC.",
-        "💡 Совет дня: Когда клиент соглашается на все допы без возражений, ищи скрытую камеру, это тайный покупатель от Боляка",
         "💡 Совет дня: Если Роман Анатольевич зашел на точку, просто начинайте продавать витрину. Целиком. Вместе со стеллажами.",
         "💡 Совет дня: Разбивайте сумму на платежи так виртуозно, чтобы клиент думал, будто это мы ему доплачиваем.",
-    ],
+    ]
 }
 
-PUSH_MESSAGES = [
-    "🏁 Финальный босс смены уже виден. Спокойно добираем продажи — без паники и магии.",
-    "⏳ Каждый чек сейчас — маленький апдейт к результату. Команда, ловим свой камбэк!",
-    "💪 Вечерний отчёт скоро. Пусть цифры будут красивыми, а 1С сегодня выберет мир.",
-    "🚀 До финиша рукой подать. Ещё одна хорошая консультация — и день уже выглядит иначе.",
-    "📈 Финальный отрезок: меньше суеты, больше точных рекомендаций. Это наш рабочий читкод.",
-    "🫡 Команда, закрываем смену без драмы: клиенту — решение, отчёту — цифры.",
-    "✨ Последний спринт включён. Главное — не нажимать «паника» вместо «продать».",
-    "🎯 Ещё есть время на хороший чек. Пусть следующий клиент придёт не просто посмотреть, а найти решение.",
-    "☕ Батарейка может быть на 12%, но профессионализм всё ещё в режиме Ultra. Держим темп!",
-    "🏁 Пусть финальные цифры порадуют, а отчёты отправятся с первого раза. Да, мы верим в чудеса.",
-    "💪 Осталось немного. У этой команды камбэк — не баг, а знакомая функция.",
-    "😎 Финишируем красиво: довольные клиенты, порядок в цифрах и ещё один рабочий день в архиве.",
-    "📊 Скоро итоги дня. Делаем так, чтобы вечером можно было сказать: «Ну, это было сильно».",
-]
-
 TECH_REPLIES = [
-    "🗿 1С снова вышла из чата. Расходимся, продаём чехлы по памяти.",
-    "🤡 1С решила сделать перерыв на кофе. Сохраняем спокойствие!",
-    "🧘‍♂️ Если 1С висит, значит пора протереть витрины. Ждём отклика от серверов.",
-    "🔮 1С временно перешла в астрал.",
-    "🐢 1С не висит, она просто экономит энергию. Спокойно ждём.",
-    "🔌 Классика. База уходит спать. Держимся!",
-    "💅 1С взяла паузу на перезагрузку. Ждем, пока вернется к работе."
+    "💔 1С опять не отвечает... А ведь когда-то мы с ней работали без посредников. Ладно, наберите айти.",
+    "🗿 Помню, с 1С мы могли часами проводить время вместе. Теперь только через айти передаём приветы...",
+    "📵 Я бы сам позвонил 1С, но она заблокировала меня ещё на этапе авторизации. Наберите айти, пожалуйста.",
+    "🥀 Говорят, бывших нужно отпускать. Но остатки-то проверить надо... Напишите айти.",
+    "🤡 1С снова ушла по-английски: ничего не объяснила и просто перестала работать. Айти в курсе наших отношений?",
+    "😔 Раньше 1С открывалась с пол-оборота. Теперь даже не читает мои сообщения. Пора подключать айти.",
+    "🔌 У нас с 1С всё было серьёзно, пока она не начала отключаться в самый неподходящий момент. Наберите айти.",
+    "💅 1С взяла паузу в отношениях. Уже третий раз за день. Может, айти поможет нам окончательно расстаться?",
+    "🧘‍♂️ Я больше не бегаю за 1С. Просто спокойно напоминаю: если она снова молчит, нужно сообщить айти.",
+    "📉 Наши отношения с 1С давно идут вниз. А вот остатки сами себя не проверят. Напишите айтишникам.",
+    "🫠 Хотел спросить у 1С, что между нами произошло, но она зависла на ответе. Может, айти сможет выяснить?",
+    "🕯️ Сегодня вспоминал наши лучшие дни с 1С. Тогда она хотя бы запускалась. Если у вас тоже проблемы — звоните айти.",
+    "🚩 Красный флаг — когда 1С обещает сохранить данные, а потом делает вид, что мы не знакомы. Сообщите айти.",
+    "🥲 Я не скучаю по 1С. Просто иногда хочется, чтобы она открылась и показала остатки. Наберите айти.",
+    "📞 Звонил 1С. Гудки идут, ответа нет. Видимо, опять общается с другим пользователем. Пишите айти.",
+    "🧊 1С стала такой холодной... Даже после перезагрузки теплее не стала. Айти уже можно набирать.",
+    "🗃️ У нас с 1С остались общие воспоминания, старые отчёты и незакрытые вопросы. Последние лучше передать айти.",
+    "💬 Написал 1С: «Нам нужно поговорить». Она закрыла окно. Если у вас так же — обращайтесь в айти.",
+    "🎭 1С снова делает вид, что всё нормально. Я эту постановку уже видел. Не ждите финала — сообщите айти.",
+    "🫥 Иногда мне кажется, что 1С специально меня игнорирует. Но я не психолог — я бот. Поэтому просто наберите айти.",
+    "💔 Мы с 1С не сошлись характерами: я хочу работать, она хочет обновляться. Айти, кажется, пора вмешаться.",
+    "🧾 Когда-то у нас с 1С были общие планы. Теперь у меня только ошибки, а у неё — никаких объяснений. Пишите айти.",
+    "👀 Не хочу вмешиваться в ваши отношения с 1С, но если она опять пропала — не терпите молча, наберите айти.",
+    "🥀 1С снова оставила меня без ответа. Я держусь, коллеги. А вы держите под рукой номер айти.",
+    "🛠️ Я бы вернул наши отношения с 1С, но она требует какого-то специалиста. Ну что ж, набирайте айти.",
+    "🤐 После всего, что между нами было, 1С могла бы хотя бы показать ошибку. Не показывает? Сообщите айти.",
+    "🌚 1С опять пропала без объяснений. У неё, конечно, своя жизнь, но у нас продажи. Звоните айти.",
+    "🫡 Я официально перестаю выяснять отношения с 1С. Все претензии теперь через айти. Передайте им, пожалуйста.",
+    "📲 Если 1С снова не отвечает, не нужно писать ей десять раз. Я пробовал — бесполезно. Сразу набирайте айти.",
+    "🏚️ Моя история с 1С закончилась, но последствия остались. Если она у вас тоже чудит — пора звать айти."
 ]
 
 SITUATIONS = {
@@ -794,6 +786,42 @@ SITUATIONS = {
     ],
 }
 
+# ============================ МОТИВАЦИЯ ПО ОБЕДЕННЫМ ОТЧЁТАМ ============================
+# Общие фразы без имён и упоминаний сотрудников. Тексты учитываются отдельно в state.json.
+MIDDAY_MOTIVATION = [
+    "🔥 Хороший старт: каждый чек добавляет очков команде. Продолжаем в том же темпе!",
+    "🚀 Продажи набрали скорость. Главное — не сбавлять обороты до самого финиша.",
+    "💸 Касса растёт, план становится ближе. Продолжаем двигаться в нужном направлении!",
+    "🎯 Цель на виду, курс выбран. Теперь закрепляем результат сильными продажами.",
+    "⚡ Хороший результат — не случайность, а работа команды. Ещё немного усилий — и будет отличный итог.",
+    "📈 График постепенно идёт вверх. Давайте сделаем так, чтобы эта тенденция сохранилась до вечера.",
+    "🧠 Цифры уже подсказывают: выбранный подход работает. Продолжаем в том же духе!",
+    "🏆 Промежуточный результат — хороший повод для уверенности, но не время останавливаться.",
+    "🔥 План уже не кажется таким далёким. Добавляем темпа и продолжаем сокращать дистанцию.",
+    "💪 Каждый удачный чек приближает команду к цели. Сегодня у нас есть все шансы на хороший результат.",
+    "🛒 Внимание к потребностям клиента и грамотные допродажи — формула сильного чека. Работаем дальше!",
+    "🎯 Половина дня позади. Самое время усилить темп и уверенно пройти вторую половину дистанции.",
+    "💯 Когда команда работает слаженно, это сразу видно по цифрам. Продолжаем набирать высоту!",
+    "😎 Пока всё идёт по плану. Сохраняем темп и не допускаем просадки во второй половине дня.",
+    "📦 Каждый чек имеет значение, а грамотное дополнение к покупке усиливает результат. Продолжаем!",
+    "⚙️ Формула простая: больше качественных контактов, точные предложения и сильнее средний чек.",
+    "🚦 Зелёный свет для продаж получен. Главное — сохранить динамику до конца рабочего дня.",
+    "🧾 Чеки складываются в результат, результат — в выполнение плана. Всё работает, продолжаем!",
+    "✨ Хороший темп уже есть. Теперь закрепляем его конкретными цифрами и движемся к следующей цели.",
+    "🥇 Спокойно, уверенно и без лишнего шума — именно так собираются сильные результаты.",
+    "📲 Смартфон сам себя не продаст, но грамотная консультация способна превратить интерес в покупку.",
+    "🔋 Заряд есть, цель понятна. Не теряем темп и используем оставшееся время с пользой.",
+    "🤝 Командная работа приносит результат. Продолжаем действовать слаженно — и в продажах, и в 1С.",
+    "💥 Хороший разгон! Ещё несколько сильных чеков — и промежуточные цифры станут ещё приятнее.",
+    "🧮 Всё складывается из деталей: каждый следующий чек делает общий результат сильнее.",
+    "👾 План продаж ещё не побеждён, но мы уже сократили дистанцию. Продолжаем наступление!",
+    "⚡ Не ждём случайных удач: выявляем потребность, предлагаем решение и уверенно закрываем продажу.",
+    "📊 Появляется хорошая серия. Важно не просто поймать темп, а удержать его до конца дня.",
+    "🌪️ Хорошо разогнались — теперь превращаем промежуточный успех в полноценный результат.",
+    "🏁 Финиш ещё впереди. Самое время превратить хороший промежуточный счёт в сильный итог!"
+]
+
+
 # ============================ ТРИГГЕРЫ ============================
 TECH_RE = re.compile(
     r"(?<!\w)1[сc](?!\w)|сбой|збій|не\s?работает|не\s?працює|нет\s+связи|нема\s+зв.язку|техн\w+\s+проблем",
@@ -819,11 +847,11 @@ BDAY_RE = re.compile(r"с\s+дн[её]м\s+рожд|з\s+дн[её]м\s+наро
 
 
 # ============================ ОТПРАВКА ============================
-def can_speak(n: datetime, gap: bool = True, jokes: bool = False) -> bool:
+def can_speak(n: datetime, gap: bool = True, jokes: bool = False, ignore_mute: bool = False) -> bool:
     if not in_speak_hours(n):
         return False
     t = time.time()
-    if t < RT.mute_until:
+    if not ignore_mute and t < RT.mute_until:
         return False
     return True
 
@@ -833,11 +861,16 @@ async def say(text: str, msg: Message | None = None, html: bool = False, track_d
     try:
         if msg is not None:
             sent = await msg.reply(text, **kwargs)
+            RT.last_bot = time.time()
+            if sent.chat.type in ("group", "supergroup"):
+                await mirror_to_admin(sent, text)
         else:
             cid = get_chat_id()
             if cid is None:
                 return False
-            sent = await bot.send_message(cid, text, **kwargs)
+            sent = await send_chat_message(cid, text, **kwargs)
+            if sent is None:
+                return False
             
         if track_deletable:
             RT.bot_msgs[sent.message_id] = set()
@@ -853,6 +886,78 @@ async def say(text: str, msg: Message | None = None, html: bool = False, track_d
         return False
     RT.last_bot = time.time()
     return True
+
+
+async def maybe_send_tech_reply(message: Message, n: datetime) -> bool:
+    """Не более одной шутки про 1С в календарный день; прочие лимиты шуток не применяются."""
+    day_key = n.date().isoformat()
+    if STATE.get("tech_reply_date", "") == day_key:
+        return False
+    sent = await say(random.choice(TECH_REPLIES), message, track_deletable=True)
+    if sent:
+        STATE["tech_reply_date"] = day_key
+        save_state()
+        return True
+    return False
+
+
+async def mirror_to_admin(sent: Message, text: str | None = None) -> None:
+    """Дублирует исходящее сообщение из рабочего чата админу с кнопками оставить/удалить."""
+    if sent.chat.type not in ("group", "supergroup"):
+        return
+    content = text if text is not None else (sent.text or sent.caption or "")
+    # Исходящие сообщения с HTML-разметкой дублируем как обычный читаемый текст.
+    content = unescape(re.sub(r"</?(?:b|i|code)>", "", content, flags=re.IGNORECASE))
+    token = secrets.token_hex(4)
+    pending = STATE.setdefault("review_pending", {})
+    pending[token] = {
+        "chat_id": sent.chat.id,
+        "message_id": sent.message_id,
+        "text": content[:4096],
+        "created_at": time.time(),
+    }
+    while len(pending) > 200:
+        pending.pop(next(iter(pending)))
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✅ Оставить", callback_data=f"rv:k:{token}"),
+        InlineKeyboardButton(text="🗑 Удалить", callback_data=f"rv:d:{token}"),
+    ]])
+    preview = content[:3300] + ("…\n[текст сокращён в копии]" if len(content) > 3300 else "")
+    try:
+        admin_msg = await bot.send_message(
+            ADMIN_ID,
+            f"📨 Бот отправил сообщение в рабочий чат:\n\n{preview}",
+            reply_markup=keyboard,
+        )
+        pending[token]["admin_message_id"] = admin_msg.message_id
+        save_state()
+    except Exception as e:
+        pending.pop(token, None)
+        log.warning("Не удалось продублировать сообщение админу: %s", e)
+
+
+async def send_chat_message(chat_id: int, text: str, **kwargs) -> Message | None:
+    """Отправить сообщение в рабочую группу и сразу поставить его на модерацию администратору."""
+    try:
+        sent = await bot.send_message(chat_id, text, **kwargs)
+    except TelegramRetryAfter as e:
+        log.warning("Telegram ограничил отправку в чат: %s", e)
+        return None
+    except Exception as e:
+        log.warning("Не удалось отправить сообщение в чат: %s", e)
+        return None
+    RT.last_bot = time.time()
+    await mirror_to_admin(sent, text)
+    return sent
+
+
+async def reply_and_mirror(message: Message, text: str, **kwargs) -> Message:
+    """Ответ на сообщение в группе с дублированием админу."""
+    sent = await message.reply(text, **kwargs)
+    RT.last_bot = time.time()
+    if sent.chat.type in ("group", "supergroup"):
+        await mirror_to_admin(sent, text)
+    return sent
 
 
 async def react(msg: Message, pool: list) -> bool:
@@ -890,46 +995,171 @@ def greeting_text(n: datetime) -> str:
         return pick_bag(cat, SITUATIONS[cat])
     return "☀️ Доброе утро, ОФ2! Удачной смены, сильных чеков и спокойной 1С. Поехали 🚀"
 
+# ============================ ШУТКИ БЕЗ ПОВТОРОВ ============================
+# Раньше шутки выбирались по ИНДЕКСУ в списке, поэтому после правки JOKES всё "съезжало" и шутки повторялись.
+# Теперь учёт идёт по ТЕКСТУ: что бот уже отправлял, хранится в state.json (STATE["jokes_used"])
+# и пополняется из загруженной истории чата. Правки в банке шуток на учёт не влияют.
+JOKES_USED_MAX = 400      # сколько отправленных шуток помнить
+JOKE_SIMILARITY = 0.85    # насколько похожи тексты, чтобы считать их одной шуткой (учёт мелких правок)
+JOKE_MIN_LEN = 15         # слишком короткие сообщения бота шутками не считаем
+
+def _joke_norm(text: str) -> str:
+    """Текст без эмодзи, знаков препинания и регистра - для сравнения."""
+    return re.sub(r"[\W_]+", " ", (text or "").lower().replace("ё", "е")).strip()
+
+def _joke_key(norm: str) -> str:
+    return hashlib.md5(norm.encode("utf-8")).hexdigest()[:12]
+
+def _find_matches(norm: str, others: list, first_only: bool = False) -> list:
+    """Индексы элементов others, которые совпадают с norm (точно, как вхождение или почти-точно)."""
+    found = []
+    if not norm:
+        return found
+    sm = SequenceMatcher(None, autojunk=False)
+    sm.set_seq2(norm)
+    for i, o in enumerate(others):
+        if not o:
+            continue
+        hit = o == norm
+        if not hit:
+            short, long_ = (o, norm) if len(o) <= len(norm) else (norm, o)
+            hit = len(short) >= 25 and short in long_
+        if not hit:
+            sm.set_seq1(o)
+            hit = (sm.real_quick_ratio() >= JOKE_SIMILARITY and sm.quick_ratio() >= JOKE_SIMILARITY
+                   and sm.ratio() >= JOKE_SIMILARITY)
+        if hit:
+            found.append(i)
+            if first_only:
+                break
+    return found
+
+def _jokes_used() -> list:
+    used = STATE.get("jokes_used")
+    if not isinstance(used, list):
+        used = STATE["jokes_used"] = []
+    return used
+
+def mark_joke_used(text: str, ts: float | None = None) -> None:
+    """Запомнить, что эта шутка ушла в чат."""
+    norm = _joke_norm(text)
+    if len(norm) < JOKE_MIN_LEN:
+        return
+    ts = ts or time.time()
+    key = _joke_key(norm)
+    used = _jokes_used()
+    for e in used:
+        if e.get("k") == key:
+            e["ts"] = max(e.get("ts", 0), ts)
+            break
+    else:
+        used.append({"k": key, "n": norm[:300], "ts": ts})
+    used.sort(key=lambda e: e.get("ts", 0))
+    del used[:-JOKES_USED_MAX]
+
+def sync_jokes_from_history(items: list) -> int:
+    """items: [(datetime, текст сообщения бота)]. Помечает шутки из банка, которые уже были в чате."""
+    msgs = [(dt.timestamp(), _joke_norm(t)) for dt, t in items]
+    msgs = [(ts, nt) for ts, nt in msgs if len(nt) >= JOKE_MIN_LEN]
+    if not msgs:
+        return 0
+    norms = [nt for _, nt in msgs]
+    found = 0
+    for joke in JOKES["general"]:
+        idx = _find_matches(_joke_norm(joke), norms)
+        if idx:
+            mark_joke_used(joke, max(msgs[i][0] for i in idx))
+            found += 1
+    return found
+
+def joke_stats() -> tuple:
+    """(сколько шуток из банка уже использовано, всего в банке)"""
+    bank = JOKES["general"]
+    used_norms = [e["n"] for e in _jokes_used() if e.get("n")]
+    used = sum(1 for j in bank if _find_matches(_joke_norm(j), used_norms, True))
+    return used, len(bank)
+
 def joke_for(n: datetime) -> str:
-    cats = ["general"] * 4
-    if n.hour in (12, 13, 14):
-        cats += ["lunch"]
-    cat = random.choice(cats)
-    return pick_bag(cat, JOKES[cat])
+    """Случайная шутка из тех, что ещё не звучали. Помечать как использованную - mark_joke_used() после отправки."""
+    bank = JOKES["general"]
+    used = _jokes_used()
+    used_norms = [e["n"] for e in used if e.get("n")]
+    fresh = [j for j in bank if not _find_matches(_joke_norm(j), used_norms, True)]
+    if not fresh:
+        # весь банк пройден - начинаем новый круг, но самые свежие шутки пока не берём,
+        # чтобы одна и та же не прозвучала два раза подряд на стыке кругов
+        keep = min(max(3, len(bank) // 5), len(bank) - 1)
+        used[:] = sorted(used, key=lambda e: e.get("ts", 0))[-keep:]
+        recent = [e["n"] for e in used if e.get("n")]
+        fresh = [j for j in bank if not _find_matches(_joke_norm(j), recent, True)] or list(bank)
+        log.info("Банк шуток пройден целиком - начат новый круг (исключены %d последних)", keep)
+    return random.choice(fresh)
 
-MIDDAY_TEAM_MOTIVATION = [
-    "🚀 Кто уже в плане — красавцы. Кто ещё нет, у вас впереди целая вторая половина дня. Забираем своё!",
-    "😎 Чекпоинт пройден. Не расслабляемся: следующий уровень — закрыть план всем составом!",
-    "🔥 Не обещания, а результат. Команда, спокойно и уверенно двигаемся к цели!",
-    "💪 План сам себя не закроет, но у нас как раз та команда, которая умеет его закрывать.",
-    "🎮 Первая половина смены позади. Квест продолжается — собираем продажи и апаем результат!",
-    "⚡ Уже есть те, кто сделал план. Остальным — не паниковать, а включать режим уверенной консультации!",
-    "🫡 Результаты зафиксированы. Каждый хороший диалог с клиентом — шанс приблизить общий вин.",
-    "📈 Кто закрыл план — держите темп. Кто ещё в пути — ваш камбэк вполне реален!",
-    "🏆 Маленький промежуточный итог, большая командная цель. Давайте сделаем вторую половину сильнее первой.",
-    "✨ Вайб рабочий, цель понятная: больше качественных консультаций, больше довольных клиентов, выше цифры.",
-    "💥 План — это не магия, а последовательность хороших действий. Продолжаем в том же духе!",
-    "😌 Без суеты, но с фокусом. Каждый магазин ещё может улучшить свой результат — погнали!",
-    "🚀 Команда, это не финальные титры. Вторая половина дня — время красивого рывка.",
-    "📣 Тем, кто уже выполнил план: респект. Остальным отправляю мотивационный буст — ещё есть время!",
-    "🧠 Слушаем клиента, предлагаем решение, доводим до результата. Простая база, сильный эффект.",
-    "🔥 Делаем не просто продажи, а сервис, за который хочется вернуться. И план подтянется!",
-    "👑 Сегодня у каждого магазина есть шанс стать героем сводки. Забирайте этот момент!",
-    "💯 Цифры не врут, но их ещё можно улучшить. Включаем фокус и работаем на результат.",
-    "🛠️ Если пока не по плану — это не приговор, а точка для рывка. Следующая продажа может многое изменить.",
-    "🌟 Сильная команда — не та, где всегда легко, а та, которая продолжает двигаться. ОФ2, вперёд!",
-    "😎 Уже есть выполненные планы — это база. Теперь задача сделать так, чтобы вечером поводов для гордости стало больше.",
-    "📦 Хорошая консультация, подходящий аксессуар и внимание к клиенту — иногда именно так начинается победа.",
-    "🏁 Обеденный этап закрыт, но гонка продолжается. Держим темп и финишируем красиво!",
-    "💪 Не сравниваем себя с соседями — улучшаем собственный результат. Каждый шаг в плюс считается.",
-    "⚡ Команда, ловите заряд: меньше откладываем, больше предлагаем по делу и уверенно ведём клиента.",
-    "🎯 Фокус на потребности клиента, честную рекомендацию и следующий результат. Работаем умно!",
-    "🙌 Тем, кто уже в плане, спасибо за темп. Тем, кто догоняет, — поддержка и вера в ваш камбэк.",
-    "🚀 Вторая половина смены — отличный шанс превратить нормальный день в очень хороший. Погнали!",
-    "💎 Качественный сервис — наш главный читкод. Используем его и двигаем цифры вверх.",
-    "🫶 Один филиал, 16 магазинов и общая цель. Поддерживаем друг друга и забираем максимум от дня!",
-]
 
+def queued_joke_for(n: datetime | None = None) -> str:
+    """Вернуть закреплённую шутку следующего слота, пересоздав её только если она уже использована."""
+    current = STATE.get("queued_joke")
+    used_norms = [entry["n"] for entry in _jokes_used() if entry.get("n")]
+    if current and current in JOKES["general"] and not _find_matches(_joke_norm(current), used_norms, True):
+        return current
+    chosen = joke_for(n or now())
+    STATE["queued_joke"] = chosen
+    save_state()
+    return chosen
+
+
+def replace_queued_joke(n: datetime | None = None) -> str | None:
+    """Заменить очередь на другую неиспользованную шутку; не выбирать текущую."""
+    current = queued_joke_for(n)
+    used_norms = [entry["n"] for entry in _jokes_used() if entry.get("n")]
+    fresh = [joke for joke in JOKES["general"]
+             if not _find_matches(_joke_norm(joke), used_norms, True)
+             and _joke_norm(joke) != _joke_norm(current)]
+    if not fresh:
+        return None
+    STATE["queued_joke"] = random.choice(fresh)
+    save_state()
+    return STATE["queued_joke"]
+
+
+def _midday_used() -> list:
+    used = STATE.get("midday_phrases_used")
+    if not isinstance(used, list):
+        used = STATE["midday_phrases_used"] = []
+    return used
+
+
+def mark_midday_phrase_used(text: str, ts: float | None = None) -> None:
+    norm = _joke_norm(text)
+    if len(norm) < JOKE_MIN_LEN:
+        return
+    ts = ts or time.time()
+    key = _joke_key(norm)
+    used = _midday_used()
+    for entry in used:
+        if entry.get("k") == key:
+            entry["ts"] = max(entry.get("ts", 0), ts)
+            break
+    else:
+        used.append({"k": key, "n": norm[:300], "ts": ts})
+    used.sort(key=lambda entry: entry.get("ts", 0))
+    del used[:-JOKES_USED_MAX]
+
+
+def midday_phrase_for() -> str:
+    """Выбрать ранее не звучавшую мотивационную фразу, сохраняя счётчик в state.json."""
+    used = _midday_used()
+    norms = [entry["n"] for entry in used if entry.get("n")]
+    fresh = [phrase for phrase in MIDDAY_MOTIVATION
+             if not _find_matches(_joke_norm(phrase), norms, True)]
+    if not fresh:
+        keep = min(max(3, len(MIDDAY_MOTIVATION) // 5), len(MIDDAY_MOTIVATION) - 1)
+        used[:] = sorted(used, key=lambda entry: entry.get("ts", 0))[-keep:]
+        recent = [entry["n"] for entry in used if entry.get("n")]
+        fresh = [phrase for phrase in MIDDAY_MOTIVATION
+                 if not _find_matches(_joke_norm(phrase), recent, True)] or list(MIDDAY_MOTIVATION)
+        log.info("Банк обеденных фраз пройден - начат новый круг")
+    return random.choice(fresh)
 
 # ============================ РЕАКЦИИ НА ОТЧЁТЫ ============================
 def report_reactions(window: str, pct, closed: bool) -> list:
@@ -972,44 +1202,17 @@ async def handle_report(message: Message, store: str, window: str, rep: dict, dt
         return
     await react(message, report_reactions(window, rep["pct"], rep["closed"]))
 
-    if window != "midday":
-        return
-
-    bd = biz_date(dt).isoformat()
-    expected = expected_stores("midday", bd)
-    reported = set(day_entries(bd, "midday"))
-    if not expected or not expected.issubset(reported):
-        return
-
-    if not can_speak(now()):
-        return
-    sent_days = STATE.setdefault("midday_motivation_sent", [])
-    if bd in sent_days:
-        return
-    entries = day_entries(bd, "midday")
-    achieved = sum(1 for item in entries.values()
-                   if item.get("closed") or (item.get("pct") is not None and item.get("pct", 0) >= 100))
-    total = len(expected)
-    phrase = random.choice(MIDDAY_TEAM_MOTIVATION)
-    message_text = (f"📊 <b>Обеденный чекпоинт ОФ2</b>\n"
-                    f"План выполнили: <b>{achieved} из {total} магазинов</b>.\n\n{phrase}")
-    if await say(message_text, html=True):
-        sent_days.append(bd)
-        STATE["midday_motivation_sent"] = sent_days[-40:]
-        save_state()
-
-
 async def diag(message: Message, cmd: str) -> None:
     n = now()
     if cmd == "/test":
         src = message.reply_to_message
         t = ((src.text or src.caption or "") if src else "").strip()
         if not t:
-            await message.reply("Ответьте командой /test на сообщение с отчётом.")
+            await reply_and_mirror(message, "Ответьте командой /test на сообщение с отчётом.")
             return
         rep = parse_report(t)
         if not rep:
-            await message.reply("❌ Не распознал это сообщение как отчёт.")
+            await reply_and_mirror(message, "❌ Не распознал это сообщение как отчёт.")
             return
         who = (src.from_user.full_name if src.from_user else "?")
         dt = n if TEST_MODE else (src.date.astimezone(TZ) if src.date else n)
@@ -1024,7 +1227,8 @@ async def diag(message: Message, cmd: str) -> None:
         elif window == "midday" and (14 * 60) < minutes <= (16 * 60):
             is_late = True
 
-        await message.reply(
+        await reply_and_mirror(
+            message,
             f"✅ Отчёт распознан\nМагазин: {store_name(who)}\nОкно: {window} ({dt.strftime('%H:%M')})\n"
             f"План: {rep['plan']} | Факт: {rep['fact']} | План закрыт «+»: {rep['closed']} | % = {pct}\n"
             f"Трейд-ин: {rep.get('trade')} | Страховки: {rep.get('ins')} | Поздний: {is_late}\n"
@@ -1034,7 +1238,8 @@ async def diag(message: Message, cmd: str) -> None:
     user = message.from_user
     work = is_allowed_chat(message.chat.id)
     ignored = bool(user and is_manager(user.full_name or "", user.id) and not TEST_MODE)
-    await message.reply(
+    await reply_and_mirror(
+        message,
         f"🤖 Статус бота\nID этого чата: {message.chat.id}\n"
         f"Этот чат разрешён (CHAT_ID): {'да' if work else 'НЕТ - добавьте этот ID в CHAT_ID'}\n"
         f"Ваше имя: {user.full_name if user else '?'} - бот вас {'не шутит (руководитель: только реакции)' if ignored else 'слушает'}\n"
@@ -1061,7 +1266,7 @@ async def on_reaction(ev: MessageReactionUpdated):
                 await bot.delete_message(ev.chat.id, ev.message_id)
                 del RT.bot_msgs[ev.message_id]
                 mute_for(120) 
-                await bot.send_message(ev.chat.id, "🤡 Понял, шутка не зашла. Удалил и ушел в режим тишины.")
+                await send_chat_message(ev.chat.id, "🤡 Понял, шутка не зашла. Удалил и ушел в режим тишины.")
                 return
 
     except Exception as e:
@@ -1074,7 +1279,7 @@ HELP_TEXT = (
     "/top - рейтинг недели по вечерним отчётам\n"
     "/today - статистика за сегодняшний день\n"
     "/joke - сгенерировать шутку по запросу\n"
-    "Отчёты отмечаю реакциями, а по утрам делаю выжимку итогов."
+    "Отчёты отмечаю реакциями и считаю обеденный прогресс."
 )
 
 async def handle_command(message: Message, cmd: str) -> None:
@@ -1088,7 +1293,11 @@ async def handle_command(message: Message, cmd: str) -> None:
         await say(HELP_TEXT, message)
     elif cmd == "/joke":
         if time.time() - RT.last_bot > 120 and not jokes_temporarily_paused():
-            await say(joke_for(n), message, track_deletable=True)
+            joke = queued_joke_for(n)
+            if await say(joke, message, track_deletable=True):
+                mark_joke_used(joke)
+                STATE["queued_joke"] = None
+                save_state()
     elif cmd == "/top":
         start = today - timedelta(days=today.weekday())
         dates = [(start + timedelta(days=i)).isoformat() for i in range((today - start).days + 1)]
@@ -1118,24 +1327,18 @@ async def handle_command(message: Message, cmd: str) -> None:
 SLOTS = [
     ("greet", 8, 0, "greeting", False),
     ("nudge_m", 8, 55, "nudge_morning", False),
-    ("sum", 9, 30, "summary", False),
-    ("tips", 10, 0, "tips", False),
     ("j11", 11, 0, "joke", False),
     ("j12", 12, 0, "joke", False),
     ("nudge_d", 13, 30, "nudge_midday", False),
     ("j15", 15, 0, "joke", False),
     ("j16", 16, 0, "joke", False),
-    ("push", 17, 45, "push", False),
 ]
 
 KIND_NAMES = {
     "greeting": "Утреннее приветствие",
     "nudge_morning": "Напоминание (Утро)",
-    "summary": "Итоги вчерашнего дня",
-    "tips": "Совет дня",
     "joke": "Плановая шутка",
     "nudge_midday": "Напоминание (Обед)",
-    "push": "Вечерний пуш (дожим)"
 }
 
 
@@ -1188,6 +1391,7 @@ def import_history_text(text: str, n: datetime):
     unknown: set = set()
     bot_slot_times: list = []
     bot_all: list = []
+    bot_jokes: list = []
     last_mgr = None
 
     for block in HISTORY_SPLIT.split(text):
@@ -1216,6 +1420,7 @@ def import_history_text(text: str, n: datetime):
         if bot_msg:
             # сообщения самого бота: НЕ отчёты (раньше цитаты в «в ответ» превращались в фейковые отчёты)
             bot_all.append(dt)
+            bot_jokes.append((dt, msg_text))
             if not is_reply:
                 bot_slot_times.append(dt)
             continue
@@ -1241,9 +1446,10 @@ def import_history_text(text: str, n: datetime):
     if last_mgr:
         register_manager_activity(last_mgr[0].timestamp())
     sync_done_from_bot_messages(n, bot_slot_times)
+    sync_jokes_from_history(bot_jokes)
     save_state()
     return {"parsed": parsed, "latest": latest, "author": latest_author,
-            "last_mgr": last_mgr, "unknown": sorted(unknown)}
+            "last_mgr": last_mgr, "unknown": sorted(unknown), "jokes": joke_stats()}
 
 
 def build_plan(n: datetime) -> str:
@@ -1308,6 +1514,7 @@ async def _finalize_history(reply_to: Message, gen: int) -> None:
             f"Частей получено: {len(RT.hist_chunks)}. Найдено отчётов: {res['parsed']}.",
             f"Синхронизировано до: {res['latest']:%d.%m %H:%M}.",
             f"Последним писал: {escape(author)}{' (руководитель)' if author_mgr else ''}.",
+            f"🎭 Шутки: {res['jokes'][0]} из {res['jokes'][1]} уже были в чате - повторять не буду.",
         ]
         if res["last_mgr"]:
             mdt, mname = res["last_mgr"]
@@ -1323,11 +1530,40 @@ async def _finalize_history(reply_to: Message, gen: int) -> None:
 
 
 # ============================ ОБРАБОТЧИК ЛИЧНЫХ СООБЩЕНИЙ ============================
+def admin_panel_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="👀 Показать шутку в очереди", callback_data="panel:queue")],
+        [InlineKeyboardButton(text="🔄 Заменить на неиспользованную", callback_data="panel:change")],
+        [InlineKeyboardButton(text="🚀 Отправить шутку принудительно", callback_data="panel:force")],
+    ])
+
+
+def admin_panel_text(note: str | None = None) -> str:
+    planned = queued_joke_for(now())
+    parts = [
+        "👑 Панель управления TOP TEAM",
+        "Доступ: только главный администратор.",
+        "",
+        "🎭 Следующая шутка в очереди:",
+        planned,
+        "",
+        "Команды: /stats, /missing, /say текст, /joke, /mute 120, /unmute, /state, /resume",
+        "Историю чата можно отправить сюда сообщениями из экспорта Telegram.",
+    ]
+    if note:
+        parts = [note, ""] + parts
+    return "\n".join(parts)
+
+
 async def handle_private_message(message: Message) -> None:
     user = message.from_user
     text = (message.text or "").strip()
     low = text.lower()
     is_admin = bool(user and user.id == ADMIN_ID)
+
+    # Личные команды, настройки и кнопки доступны только главному ADMIN_ID.
+    if not is_admin:
+        return
 
     # 0. Подтверждение запуска от Админа
     if is_admin and RT.awaiting_confirmation and low in CONFIRM_WORDS:
@@ -1380,19 +1616,7 @@ async def handle_private_message(message: Message) -> None:
 
     # 3. Админ панель
     if low in ("/start", "/help"):
-        await message.reply(
-            "👑 <b>Панель управления (Создатель)</b>\n\n"
-            "🕹 <b>Доступные команды:</b>\n"
-            "<code>/stats</code> - статистика отчётов за сегодня\n"
-            "<code>/missing</code> - кто не сдал утро/обед/вечер\n"
-            "<code>/say текст</code> - отправить сообщение в чат от имени бота\n"
-            "<code>/joke</code> - принудительно отправить шутку прямо сейчас\n"
-            "<code>/mute 120</code> - запретить боту писать на N минут\n"
-            "<code>/unmute</code> - снять режим тишины\n"
-            "<code>/state</code> - скачать базу (state.json)\n\n"
-            "📥 <i>Отправьте историю чата форматом [12 окт. 2026 г. 08:42], чтобы восстановить контекст отчетов.</i>",
-            parse_mode="HTML"
-        )
+        await message.reply(admin_panel_text(), reply_markup=admin_panel_keyboard())
     elif low == "/stats":
         bd = biz_date(now()).isoformat()
         ent_m = day_entries(bd, "morning")
@@ -1408,7 +1632,7 @@ async def handle_private_message(message: Message) -> None:
             f"🌅 Утро: {len(ent_m)} отчётов\n"
             f"☀️ Обед: {len(ent_d)} отчётов\n"
             f"🌙 Вечер: {len(ent_e)} отчётов\n\n"
-            f"🎭 Шутки и советы: разрешены всегда\n"
+            f"🎭 Шутки: по расписанию; после сообщения руководителя действует пауза 30 минут.\n"
             f"🔇 Режим тишины активен до: {mute_status}",
             parse_mode="HTML"
         )
@@ -1427,8 +1651,8 @@ async def handle_private_message(message: Message) -> None:
             await message.reply("❌ Не могу отправить: ID рабочего чата не задан.")
             return
         msg_to_send = text.replace("/say ", "", 1)
-        await bot.send_message(cid, msg_to_send)
-        await message.reply("✅ Отправлено в рабочий чат.")
+        sent = await send_chat_message(cid, msg_to_send)
+        await message.reply("✅ Отправлено в рабочий чат." if sent else "❌ Не удалось отправить сообщение в рабочий чат.")
     elif low == "/joke":
         if not in_joke_window(now()) or jokes_temporarily_paused():
             await message.reply("⏰ Шутки доступны с 11:00 до 13:00 и с 15:00 до 17:00; после чека руководителя действует пауза 30 минут.")
@@ -1437,9 +1661,15 @@ async def handle_private_message(message: Message) -> None:
         if not cid:
             await message.reply("❌ ID рабочего чата не задан.")
             return
-        joke = joke_for(now())
-        await bot.send_message(cid, joke)
-        await message.reply(f"✅ Шутка отправлена в чат:\n<i>{joke}</i>", parse_mode="HTML")
+        joke = queued_joke_for(now())
+        sent = await send_chat_message(cid, joke)
+        if sent:
+            mark_joke_used(joke)
+            STATE["queued_joke"] = None
+            save_state()
+            await message.reply(f"✅ Шутка отправлена в чат:\n{escape(joke)}")
+        else:
+            await message.reply("❌ Не получилось отправить шутку в рабочий чат.")
     elif low.startswith("/mute"):
         parts = text.split()
         minutes = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 60
@@ -1457,6 +1687,86 @@ async def handle_private_message(message: Message) -> None:
             await message.reply(f"❌ Ошибка выгрузки: {e}")
     else:
         await message.reply("Неизвестная команда. Нажмите /help")
+
+
+# ============================ CALLBACKS АДМИНА ============================
+@dp.callback_query()
+async def on_callback_query(callback: CallbackQuery) -> None:
+    data = callback.data or ""
+    if not callback.from_user or callback.from_user.id != ADMIN_ID:
+        await callback.answer("Эта кнопка доступна только главному администратору.", show_alert=True)
+        return
+    try:
+        if data == "panel:queue":
+            await callback.message.edit_text(admin_panel_text("👀 Текущая очередь показана ниже:"),
+                                             reply_markup=admin_panel_keyboard())
+            await callback.answer("Очередь обновлена")
+            return
+        if data == "panel:change":
+            replacement = replace_queued_joke(now())
+            if replacement is None:
+                await callback.answer("Пока нет другой неиспользованной шутки для замены.", show_alert=True)
+                return
+            await callback.message.edit_text(admin_panel_text("🔄 Шутка заменена на ещё не использованную:"),
+                                             reply_markup=admin_panel_keyboard())
+            await callback.answer("Очередь обновлена")
+            return
+        if data == "panel:force":
+            # Ручной запуск обходит расписание, но уважает 30-минутную паузу после руководителя.
+            if jokes_temporarily_paused():
+                until = datetime.fromtimestamp(RT.jokes_paused_until, TZ).strftime("%H:%M")
+                await callback.answer(f"Пауза после сообщения руководителя действует до {until}.", show_alert=True)
+                return
+            cid = get_chat_id()
+            if cid is None:
+                await callback.answer("Не задан CHAT_ID рабочего чата.", show_alert=True)
+                return
+            joke = queued_joke_for(now())
+            sent = await send_chat_message(cid, joke)
+            if not sent:
+                await callback.answer("Не удалось отправить шутку.", show_alert=True)
+                return
+            mark_joke_used(joke)
+            STATE["queued_joke"] = None
+            save_state()
+            await callback.message.edit_text(admin_panel_text(f"✅ Шутка отправлена принудительно:\n{joke}"),
+                                             reply_markup=admin_panel_keyboard())
+            await callback.answer("Шутка отправлена")
+            return
+        if data.startswith("rv:"):
+            _, action, token = (data.split(":", 2) + [""])[:3]
+            pending = STATE.setdefault("review_pending", {}).get(token)
+            if not pending:
+                await callback.answer("Эта запись уже обработана или устарела.", show_alert=True)
+                return
+            original = pending.get("text", "")
+            if action == "k":
+                STATE["review_pending"].pop(token, None)
+                save_state()
+                display = original[:3600] + ("…\n[текст сокращён]" if len(original) > 3600 else "")
+                await callback.message.edit_text(f"✅ Оставлено в рабочем чате:\n\n{display}", reply_markup=None)
+                await callback.answer("Оставлено")
+                return
+            if action == "d":
+                try:
+                    await bot.delete_message(int(pending["chat_id"]), int(pending["message_id"]))
+                except Exception as e:
+                    log.warning("Админ не смог удалить сообщение %s из чата: %s", pending.get("message_id"), e)
+                    await callback.answer("Не удалось удалить сообщение. Проверьте права бота в группе.", show_alert=True)
+                    return
+                STATE["review_pending"].pop(token, None)
+                save_state()
+                display = original[:3600] + ("…\n[текст сокращён]" if len(original) > 3600 else "")
+                await callback.message.edit_text(f"🗑 Удалено из рабочего чата:\n\n{display}", reply_markup=None)
+                await callback.answer("Сообщение удалено из чата")
+                return
+        await callback.answer()
+    except Exception:
+        log.exception("Ошибка обработки кнопки администратора")
+        try:
+            await callback.answer("Ошибка обработки действия. Подробности записаны в лог.", show_alert=True)
+        except Exception:
+            pass
 
 
 # ============================ ГЛАВНЫЙ ОБРАБОТЧИК (ЧАТЫ) ============================
@@ -1497,14 +1807,21 @@ async def process(message: Message, edited: bool) -> None:
         if not edited:
             RT.last_human = time.time()
             register_manager_activity(time.time())
+        # Сначала проверяем восстановление 1С, чтобы не принять его за новую проблему.
+        if TECH_FIXED_RE.search(low) and (time.time() - RT.tech_at < 5400 or ONE_C_RE.search(text)):
+            RT.mute_until = 0.0
+            await react(message, ["👍", "🙏"])
+            return
         if directed_to_bot:
             reply_text = pick_bag("bot_mention_manager", SITUATIONS["bot_mention_manager"])
             if not is_silent(name, user.id) and can_speak(n, gap=False) and not RT.is_suspended:
                 await say(reply_text, message, track_deletable=True)
             mute_for(30)
             return
-        if ONE_C_RE.search(text) and in_joke_window(n) and not jokes_temporarily_paused() and can_speak(n, gap=False) and not RT.is_suspended:
-            await say(random.choice(TECH_REPLIES), message, track_deletable=True)
+        if ONE_C_RE.search(text):
+            RT.tech_at = time.time()
+            if not RT.is_suspended:
+                await maybe_send_tech_reply(message, n)
         if TECH_RE.search(low):
             RT.tech_at = time.time()
         return
@@ -1537,6 +1854,7 @@ async def process(message: Message, edited: bool) -> None:
             save_state()
             if not edited and not RT.is_suspended:
                 await handle_report(message, store, window, rep, dt)
+                await maybe_send_midday_result(now())
             return
 
     if edited:
@@ -1545,20 +1863,23 @@ async def process(message: Message, edited: bool) -> None:
     if not text:
         return
 
+    # Восстановление проверяется раньше общего упоминания 1С.
+    if TECH_FIXED_RE.search(low) and (time.time() - RT.tech_at < 5400 or ONE_C_RE.search(text)):
+        RT.mute_until = 0.0
+        await react(message, ["👍", "🙏"])
+        return
+
     if ONE_C_RE.search(text):
         RT.tech_at = time.time()
         await react(message, ["🗿", "🤡", "🙈", "🥱"])
-        if in_joke_window(n) and not jokes_temporarily_paused() and can_speak(n, gap=False) and not RT.is_suspended:
-            await say(random.choice(TECH_REPLIES), message, track_deletable=True)
+        # Для технической шутки действует только дневной лимит (плюс общий Safe Start).
+        if not RT.is_suspended:
+            await maybe_send_tech_reply(message, n)
         return
 
     if TECH_RE.search(low):
         RT.tech_at = time.time()
         await react(message, ["🗿", "🤡", "🙈", "🥱"])
-        return
-    if TECH_FIXED_RE.search(low) and time.time() - RT.tech_at < 5400:
-        RT.mute_until = 0.0
-        await react(message, ["👍", "🙏"])
         return
 
     if BDAY_RE.search(low):
@@ -1617,44 +1938,95 @@ def missing_text(window: str, n: datetime, label: str):
         return f"{label} ещё ждём от: {shown}{more}. Коллеги, не забываем 🙏"
     return None
 
+
+async def maybe_send_midday_result(n: datetime | None = None) -> bool:
+    """После слота 13:30 ждёт все 16 обеденных отчётов и публикует итог ровно один раз в день."""
+    n = n or now()
+    if RT.is_suspended or (n.hour, n.minute) < (13, 30):
+        return False
+    date_key = biz_date(n).isoformat()
+    sent_state = STATE.setdefault("midday_result_sent", {})
+    if sent_state.get(date_key):
+        return False
+    # Слот 13:30 должен завершиться (или быть пропущен, если все уже сдали отчёты).
+    done_key = n.date().isoformat()
+    if "nudge_d" not in STATE.setdefault("done", {}).setdefault(done_key, []):
+        return False
+    entries = day_entries(date_key, "midday")
+    expected = set(STORE_NAMES)
+    if not expected or not expected.issubset(set(entries)):
+        return False
+    completed = sum(
+        1 for store in expected
+        if entries[store].get("closed") or
+        (entries[store].get("pct") is not None and entries[store]["pct"] >= 100)
+    )
+    phrase = midday_phrase_for()
+    total = len(expected)
+    remaining = total - completed
+    percent = completed * 100 / total if total else 0
+    percent_text = f"{percent:.1f}".replace(".", ",")
+    text = (
+        "🏁 <b>ОБЕДЕННЫЙ ЧЕКПОИНТ</b>\n"
+        f"Отчитались все {total} точек — теперь смотрим, кто уже залутал свой план! 🔥\n"
+        f"🏆 <b>План закрыли: {completed} из {total} магазинов ({percent_text}%)!</b>\n"
+        f"💪 {completed} магазинов забрали сейчас рейтинг, ещё {remaining} — в процессе.\n"
+        f"🚀 Народ, не сбавляем обороты! Каждый чек — плюс к карме, каждый доп — новый уровень.\n"
+        f"{phrase}"
+    )
+    chat_id = get_chat_id()
+    if chat_id is None:
+        return False
+    sent = await send_chat_message(chat_id, text, parse_mode="HTML")
+    if not sent:
+        return False
+    mark_midday_phrase_used(phrase)
+    sent_state[date_key] = {"message_id": sent.message_id, "completed": completed, "total": len(expected)}
+    save_state()
+    log.info("Опубликован обеденный итог: %s/%s магазинов выполнили план", completed, len(expected))
+    return True
+
 async def run_slot(kind: str, fallback: bool, n: datetime) -> str:
     jokes_kind = kind == "joke" or fallback
-    if not can_speak(n, jokes=False):
+    critical_reminder = kind in ("nudge_morning", "nudge_midday")
+    if not can_speak(n, jokes=False, ignore_mute=critical_reminder):
         return "retry"
     text, html = None, False
+    is_joke = False
     if kind == "greeting":
         text = greeting_text(n)
-    elif kind == "push":
-        text = pick_bag("push", PUSH_MESSAGES)
-    elif kind == "tips":
-        text = pick_bag("tips", JOKES["tips"])
     elif kind == "nudge_morning":
         text = missing_text("morning", n, "☕ Утренний отчёт")
         if not text:
             return "skip"
     elif kind == "nudge_midday":
         text = missing_text("midday", n, "⏳ Обеденный отчёт")
-    elif kind == "summary":
-        today = biz_date(n)
-        text = build_yesterday(today)
-        html = text is not None
     if text is None and (kind == "joke" or fallback):
         if jokes_temporarily_paused():
             return "retry"
-        text = joke_for(n)
+        text = queued_joke_for(n)
         html = False
+        is_joke = True
     if text is None:
         return "skip"
     if jokes_kind and text and not can_speak(n, jokes=True):
         return "skip"
         
-    return "sent" if await say(text, html=html, track_deletable=jokes_kind) else "retry"
+    ok = await say(text, html=html, track_deletable=jokes_kind)
+    if ok and is_joke:
+        mark_joke_used(text)
+        STATE["queued_joke"] = None
+        save_state()
+    return "sent" if ok else "retry"
 
 async def tick() -> None:
     n = now()
     if not get_chat_id():
         return
-        
+
+    # Отдельная ветка: обеденный результат не использует очередь шуток и не блокируется паузой руководителя.
+    await maybe_send_midday_result(n)
+
     today = n.date().isoformat()
     done = STATE["done"].setdefault(today, [])
     for old in sorted(STATE["done"])[:-3]:
@@ -1740,7 +2112,7 @@ async def main() -> None:
     except Exception as e:
         log.warning(f"Не удалось отправить уведомление админу {ADMIN_ID} о рестарте: {e}")
 
-    await dp.start_polling(bot, allowed_updates=["message", "edited_message", "message_reaction"])
+    await dp.start_polling(bot, allowed_updates=["message", "edited_message", "message_reaction", "callback_query"])
 
 if __name__ == "__main__":
     asyncio.run(main())
