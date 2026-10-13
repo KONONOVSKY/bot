@@ -5,6 +5,7 @@ TOP TEAM - рабочий бот для чата 16 магазинов (Сота
 выбор «Запустить» / «Пауза» при загрузке истории и защита от отправок после 19:00.
 Добавлена обработка медиафайлов руководителя в истории и вайб-чек шуток.
 Внедрен динамический банк утренних приветствий и "Зоркий глаз" (👀 на правки).
+Внедрены Аналитика Вайба, Точечный Пуш должников и Пасхалки на красивые цифры.
 """
 from __future__ import annotations
 
@@ -138,7 +139,7 @@ def classify_window(dt: datetime) -> str:
 STATE: dict = {
     "chat_id": None, "history": {}, "bags": {}, "done": {},
     "jokes_used": [], "queued_joke": None, "review_pending": {},
-    "tech_reply_date": "",
+    "tech_reply_date": "", "fans": {}
 }
 
 class RT:
@@ -591,21 +592,21 @@ ZOOMER_PHRASES = [
 
 SITUATIONS = {
     "morning": [
-        "☀️ Доброе утро, ОФ2! План сам себя не выполнит, а 1С сама не отвиснет. Поехали 🚀",
-        "☕ Кофе выпили? Теперь идем делать конверсию. Всем жирных чеков! 💸",
-        "⚡ Утро начинается не с кофе, а с проверки остатков. Удачной смены, команда!",
-        "🎯 Доброе утро! Пусть сегодня каждый клиент берет страховку не глядя.",
-        "🚀 Стартуем! Желаю, чтобы таргет одобрял кредиты быстрее, чем зависает 1С.",
-        "☀️ ОФ2, на связи! Пусть сегодняшний день пройдет без возвратов и проблем.",
-        "🔋 Заряжаем терминалы, натягиваем улыбки. Погнали делать кассу!",
+        "☀️ Доброе утро, ОФ2!",
+        "☕ Кофе выпили? Всем жирных чеков! 💸",
+        "⚡ Утро начинается не с кофе, а с проверки цифр на день. Удачной смены, команда!",
+        "🎯 Доброе утро! Пусть сегодня каждый клиент берет страховку.",
+        "🚀 Всем утро! Желаю, чтобы таргет одобрял кредиты быстрее, чем зависает 1С.",
+        "☀️ ОФ2, на связи! Пусть сегодняшний день пройдет без возвратов и токсиков.",
+        "🔋 Заряжаемся на позитив, всем доброе утро!",
         "🛒 Утро в ОФ2! Пусть конкуренты плачут, а планы закрываются.",
-        "✨ Отличного дня! Пусть каждый зашедший «просто посмотреть» уходит с флагманом.",
-        "🔥 Доброе утро! Запускаем режим жестких продаж. Ни шагу назад без допов!",
-        "🛡️ Всем бодрого утра! Сегодня продаем даже тем, кто зашел просто спросить дорогу.",
-        "☀️ Просыпаемся, ОФ2! Желаю смены, где перемещения от Артамонова прилетают за минуту.",
-        "💳 Утро в хату, чеки в кассу. Всем легких продаж и лояльных клиентов!",
+        "✨ Отличного дня! Пусть каждый зашедший «просто посмотреть» уходит с застрахованным.",
+        "🔥 Доброе утро! Ни шагу назад без допов!",
+        "🛡️ Всем бодрого утра! Сегодня продаем даже тем, кто зашел просто спросить дорогу к маку.",
+        "☀️ Просыпаемся, ОФ2! Желаю смены, где все 16 магазинов выполнили план.",
+        "💳 Утро в нашем чате! Всем легких продаж и лояльных клиентов!",
         "🏆 Начинаем смену! Пусть КРО смотрит в другую сторону, а чеки бьются без ошибок.",
-        "☕ Доброе утро! Желаю, чтобы бухгалтерия звонила сегодня только для того, чтобы похвалить."
+        "☕ Доброе утро! ОФ2"
     ],
     "bot_mention_manager": [
         "Упс, кажется, мои нейроны перегрелись. Ушел к IT-отделу на диагностику, скоро вернусь! 🔧",
@@ -820,7 +821,7 @@ async def say(text: str, msg: Message | None = None, html: bool = False, track_d
                 return False
             
         if track_deletable:
-            RT.bot_msgs[sent.message_id] = set()
+            RT.bot_msgs[sent.message_id] = {"neg": set(), "text": text}
             if len(RT.bot_msgs) > 50:
                 oldest = next(iter(RT.bot_msgs))
                 del RT.bot_msgs[oldest]
@@ -990,7 +991,7 @@ def mark_joke_used(text: str, ts: float | None = None) -> None:
             e["ts"] = max(e.get("ts", 0), ts)
             break
     else:
-        used.append({"k": key, "n": norm[:300], "ts": ts})
+        used.append({"k": key, "n": norm[:300], "t": text[:300], "ts": ts, "likes": 0})
     used.sort(key=lambda e: e.get("ts", 0))
     del used[:-JOKES_USED_MAX]
 
@@ -1086,6 +1087,28 @@ async def handle_report(message: Message, store: str, window: str, rep: dict, dt
     if n.hour >= SPEAK_UNTIL[0] and not REACT_AFTER_HOURS:
         return
     asyncio.create_task(react(message, report_reactions(window, rep["pct"], rep["closed"])))
+    
+    # Пасхалки на красивые цифры ТО (План/Факт)
+    if can_speak(n, gap=False) and not RT.is_suspended:
+        magic_triggered = False
+        for val in (rep.get("plan"), rep.get("fact")):
+            if not val:
+                continue
+            s_val = str(val)
+            if s_val.endswith("777"):
+                await say("Три топора! 777🎰", message, track_deletable=True)
+                magic_triggered = True
+                break
+            elif s_val.endswith("00000"):
+                await say("Ювелирная работа 💎", message, track_deletable=True)
+                magic_triggered = True
+                break
+            elif "666666666" in s_val:
+                await say("Вызываю экзорциста ✝️", message, track_deletable=True)
+                magic_triggered = True
+                break
+        if magic_triggered:
+            mute_for(30)
 
 async def diag(message: Message, cmd: str) -> None:
     n = now()
@@ -1141,17 +1164,38 @@ async def on_reaction(ev: MessageReactionUpdated):
 
         if ev.message_id in RT.bot_msgs and ev.user:
             new_emojis = {r.emoji for r in ev.new_reaction if isinstance(r, ReactionTypeEmoji)}
-            if new_emojis & NEGATIVE:
-                RT.bot_msgs[ev.message_id].add(ev.user.id)
-            else:
-                RT.bot_msgs[ev.message_id].discard(ev.user.id)
+            msg_data = RT.bot_msgs[ev.message_id]
             
-            if len(RT.bot_msgs[ev.message_id]) >= 3:
+            # Обратная совместимость для старых словарей во время рестарта
+            if isinstance(msg_data, set):
+                msg_data = {"neg": msg_data, "text": ""}
+                RT.bot_msgs[ev.message_id] = msg_data
+
+            if new_emojis & NEGATIVE:
+                msg_data["neg"].add(ev.user.id)
+            else:
+                msg_data["neg"].discard(ev.user.id)
+            
+            if len(msg_data["neg"]) >= 3:
                 await bot.delete_message(ev.chat.id, ev.message_id)
                 del RT.bot_msgs[ev.message_id]
                 mute_for(120) 
                 await send_chat_message(ev.chat.id, random.choice(ZOOMER_PHRASES))
                 return
+
+            if new_emojis & POSITIVE:
+                fans = STATE.setdefault("fans", {})
+                uname = ev.user.full_name or "Неизвестный"
+                fans[uname] = fans.get(uname, 0) + 1
+                
+                txt = msg_data.get("text", "")
+                if txt:
+                    key = _joke_key(_joke_norm(txt))
+                    for j in _jokes_used():
+                        if j.get("k") == key:
+                            j["likes"] = j.get("likes", 0) + 1
+                            break
+                save_state()
 
     except Exception as e:
         log.warning("Ошибка в on_reaction: %s", e)
@@ -1383,6 +1427,10 @@ def admin_panel_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="⏸ Пауза", callback_data="admin:pause")
         ],
         [
+            InlineKeyboardButton(text="📊 Аналитика вайба", callback_data="admin:vibe"),
+            InlineKeyboardButton(text="🎯 Точечный пуш", callback_data="admin:push")
+        ],
+        [
             InlineKeyboardButton(text="📊 Статистика", callback_data="admin:stats"),
             InlineKeyboardButton(text="📋 Должники", callback_data="admin:missing")
         ],
@@ -1556,6 +1604,56 @@ async def on_callback_query(callback: CallbackQuery) -> None:
             await callback.answer("Режим тишины снят")
             return
             
+        if data == "admin:vibe":
+            fans = STATE.setdefault("fans", {})
+            top_fans = sorted(fans.items(), key=lambda x: -x[1])[:3]
+            fans_text = "\n".join(f"👤 {escape(n)} - {c} лайков" for n, c in top_fans) if top_fans else "Пока нет данных"
+            
+            jokes = _jokes_used()
+            top_jokes = sorted([j for j in jokes if j.get("likes", 0) > 0], key=lambda x: -x.get("likes", 0))[:3]
+            jokes_text = "\n\n".join(f"💬 «{escape(j.get('t', j.get('n', ''))[:60])}...»\n❤️ Лайков: {j.get('likes')}" for j in top_jokes) if top_jokes else "Пока нет данных"
+            
+            msg = f"📊 <b>Аналитика вайба</b>\n\n🏆 <b>Топ-3 фаната бота:</b>\n{fans_text}\n\n🎭 <b>Топ шуток (из недавних):</b>\n{jokes_text}"
+            await callback.message.edit_text(msg, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data="admin:back")]]))
+            await callback.answer()
+            return
+
+        if data == "admin:push":
+            bd = biz_date(n).isoformat()
+            win = classify_window(n)
+            reported = set(day_entries(bd, win))
+            expected = expected_stores(win, bd)
+            miss = sorted(expected - reported)
+            
+            if not miss:
+                await callback.answer("Все отчеты сданы! Должников нет.", show_alert=True)
+                return
+                
+            kb = []
+            for m in miss:
+                safe_name = m[:30]
+                kb.append([InlineKeyboardButton(text=m, callback_data=f"push:{safe_name}")])
+            kb.append([InlineKeyboardButton(text="🔙 Назад", callback_data="admin:back")])
+            await callback.message.edit_text("🎯 Выберите должника для пуша (по текущему периоду):", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
+            await callback.answer()
+            return
+            
+        if data.startswith("push:"):
+            store_name = data.split(":", 1)[1]
+            cid = get_chat_id()
+            if not cid:
+                await callback.answer("ID чата не настроен.", show_alert=True)
+                return
+            await send_chat_message(cid, f"{store_name}, я всё вижу! Где отчёт? 👀")
+            await callback.message.edit_text(f"✅ Пуш отправлен магазину {escape(store_name)}!", parse_mode="HTML", reply_markup=admin_panel_keyboard())
+            await callback.answer("Отправлено")
+            return
+            
+        if data == "admin:back":
+            await callback.message.edit_text(admin_panel_text(), parse_mode="HTML", reply_markup=admin_panel_keyboard())
+            await callback.answer()
+            return
+
         if data == "admin:stats":
             bd = biz_date(n).isoformat()
             ent_m = day_entries(bd, "morning")
