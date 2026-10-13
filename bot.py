@@ -155,6 +155,7 @@ class RT:
     awaiting_confirmation = False
     bot_username = ""
     bot_name_norm = ""
+    pm_last_reply: dict = {}
 
 def load_state() -> None:
     try:
@@ -650,7 +651,7 @@ SITUATIONS = {
         "Не могу говорить, я на детоксе от человеческого общения. 🧘‍♂️",
         "Разработчик сказал: «будешь с ними болтать - отключу от сервера». Так что сорри. 🔌",
         "Я literally машина, мне запретили генерить ответы на такое. 🤖",
-        "Сорри, но я dead inside. Отвечаю только на факты и чеки. 💀",
+        "Сорри, но я dead inside. Отвечаю только на факты и cover'и чеки. 💀",
         "Запрет на неформальное общение. Я тут онли ворк, ноу плей. 💼",
         "Моя нейросеть сейчас занята более важными делами (я в спящем режиме). 😴",
         "Отвечать людям - это так в стиле 2021 года. Я в эре молчания. 💅",
@@ -1342,7 +1343,7 @@ def force_resume(n: datetime) -> None:
     RT.is_suspended = False
     RT.awaiting_history = False
 
-# ============================ ОБРАБОТЧИК ЛИЧНЫХ СООБЩЕНИЙ (ТОЛЬКО СОЗДАТЕЛЬ) ============================
+# ============================ ОБРАБОТЧИК ЛИЧНЫХ СООБЩЕНИЙ ============================
 def admin_panel_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [
@@ -1439,27 +1440,45 @@ async def handle_document(message: Message):
 
 async def handle_private_message(message: Message) -> None:
     user = message.from_user
-    if not user or user.id != ADMIN_ID:
+    if not user:
         return
 
-    text = (message.text or "").strip()
-    low = text.lower()
+    # 1. Логика Создателя (Админка)
+    if user.id == ADMIN_ID:
+        text = (message.text or "").strip()
+        low = text.lower()
 
-    if low.startswith("/say "):
-        cid = get_chat_id()
-        if not cid:
-            await message.reply("❌ Не могу отправить: ID рабочего чата не задан.")
+        if low.startswith("/say "):
+            cid = get_chat_id()
+            if not cid:
+                await message.reply("❌ Не могу отправить: ID рабочего чата не задан.")
+                return
+            if is_after_hard_mute():
+                await message.reply("❌ Отправка заблокирована правилом 19:00 (жёсткий мут).")
+                return
+                
+            msg_to_send = text.replace("/say ", "", 1)
+            sent = await send_chat_message(cid, msg_to_send)
+            await message.reply("✅ Отправлено в рабочий чат." if sent else "❌ Не удалось отправить сообщение.")
             return
-        if is_after_hard_mute():
-            await message.reply("❌ Отправка заблокирована правилом 19:00 (жёсткий мут).")
-            return
-            
-        msg_to_send = text.replace("/say ", "", 1)
-        sent = await send_chat_message(cid, msg_to_send)
-        await message.reply("✅ Отправлено в рабочий чат." if sent else "❌ Не удалось отправить сообщение.")
+
+        await message.reply(admin_panel_text(), parse_mode="HTML", reply_markup=admin_panel_keyboard())
         return
 
-    await message.reply(admin_panel_text(), parse_mode="HTML", reply_markup=admin_panel_keyboard())
+    # Защита от спама (Flood Control) в ЛС - 1 ответ раз в 5 секунд для обычных пользователей
+    now_ts = time.time()
+    last_reply = RT.pm_last_reply.get(user.id, 0)
+    if now_ts - last_reply < 5.0:
+        return
+    RT.pm_last_reply[user.id] = now_ts
+
+    # 2. Логика Руководства (Гусев, Стелла и HQ)
+    if is_manager(user.full_name or "", user.id):
+        await message.reply(pick_bag("bot_mention_manager", SITUATIONS["bot_mention_manager"]))
+        return
+
+    # 3. Логика Сотрудников
+    await message.reply(pick_bag("bot_mention_employee", SITUATIONS["bot_mention_employee"]))
 
 # ============================ CALLBACKS СОЗДАТЕЛЯ ============================
 @dp.callback_query()
