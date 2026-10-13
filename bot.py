@@ -119,8 +119,8 @@ def wall_now() -> datetime:
     return datetime.now(TZ)
 
 def is_after_hard_mute() -> bool:
-    current = wall_now()
-    return (current.hour, current.minute) >= SPEAK_UNTIL
+    cur = (wall_now().hour, wall_now().minute)
+    return cur >= SPEAK_UNTIL or cur < SPEAK_FROM
 
 def classify_window(dt: datetime) -> str:
     minutes = dt.hour * 60 + dt.minute
@@ -233,7 +233,8 @@ def calc_pct(plan, fact, closed):
 
 def _extract_nums_from_rest(rest: str):
     closed = "+" in rest or bool(re.search(r"закр[иы]т", rest, re.IGNORECASE))
-    nums = [int(x) for x in re.findall(r"\d+", rest)]
+    clean_rest = re.split(r"(?i)на\s+смен[еі]|на\s+змін[іи]|стажер", rest)[0]
+    nums = [int(x) for x in re.findall(r"\d+", clean_rest)]
     return nums, closed
 
 def parse_report(text: str):
@@ -1051,7 +1052,7 @@ async def handle_report(message: Message, store: str, window: str, rep: dict, dt
     n = now()
     if n.hour >= SPEAK_UNTIL[0] and not REACT_AFTER_HOURS:
         return
-    await react(message, report_reactions(window, rep["pct"], rep["closed"]))
+    asyncio.create_task(react(message, report_reactions(window, rep["pct"], rep["closed"])))
 
 async def diag(message: Message, cmd: str) -> None:
     n = now()
@@ -1386,7 +1387,6 @@ def admin_panel_text(note: str | None = None) -> str:
 
 @dp.message(F.document)
 async def handle_document(message: Message):
-    # Строгая проверка: общаться с ботом в ЛС может исключительно Создатель (ADMIN_ID)
     if message.chat.type != "private" or not message.from_user or message.from_user.id != ADMIN_ID:
         return
         
@@ -1439,7 +1439,6 @@ async def handle_document(message: Message):
 
 async def handle_private_message(message: Message) -> None:
     user = message.from_user
-    # СТРОГАЯ ЗАЩИТА: ТОЛЬКО СОЗДАТЕЛЬ ИМЕЕТ ДОСТУП К УПРАВЛЕНИЮ В ЛС
     if not user or user.id != ADMIN_ID:
         return
 
@@ -1460,7 +1459,6 @@ async def handle_private_message(message: Message) -> None:
         await message.reply("✅ Отправлено в рабочий чат." if sent else "❌ Не удалось отправить сообщение.")
         return
 
-    # На любые другие текстовые сообщения в ЛС создателю выводим удобную панель меню
     await message.reply(admin_panel_text(), parse_mode="HTML", reply_markup=admin_panel_keyboard())
 
 # ============================ CALLBACKS СОЗДАТЕЛЯ ============================
