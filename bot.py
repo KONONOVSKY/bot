@@ -4,7 +4,7 @@ TOP TEAM - рабочий бот для чата 16 магазинов (Сота
 Обновленная версия: жесткая защита ЛС (только Создатель), интерактивное меню,
 выбор «Запустить» / «Пауза» при загрузке истории и защита от отправок после 19:00.
 Добавлена обработка медиафайлов руководителя в истории и вайб-чек шуток.
-Внедрен динамический банк утренних приветствий.
+Внедрен динамический банк утренних приветствий и "Зоркий глаз" (👀 на правки).
 """
 from __future__ import annotations
 
@@ -1736,6 +1736,10 @@ async def process(message: Message, edited: bool) -> None:
             save_state()
             if not edited and not RT.is_suspended:
                 await handle_report(message, store, window, rep, dt)
+            elif edited and not RT.is_suspended:
+                # Реакция на редактирование ("Зоркий глаз") с защитой от спама на руководителей
+                if not is_manager(name, user.id) and user.id != ADMIN_ID:
+                    await react(message, ["👀"])
             return
 
     if edited:
