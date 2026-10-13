@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """
 TOP TEAM - рабочий бот для чата 16 магазинов (Сота Альянс, Одесский регион).
-Обновленная версия с загрузкой истории через result.json и исправленным функционалом.
+Обновленная версия: жесткая защита ЛС (только Создатель), интерактивное меню,
+выбор «Запустить» / «Пауза» при загрузке истории и защита от отправок после 19:00.
 """
 from __future__ import annotations
 
@@ -1177,7 +1178,6 @@ SLOTS = [
     ("j11", 11, 0, "joke", False),
     ("j12", 12, 0, "joke", False),
     ("nudge_d", 13, 30, "nudge_midday", False),
-    ("adm_midday", 14, 0, "admin_midday_missing", False),
     ("j15", 15, 0, "joke", False),
     ("j16", 16, 0, "joke", False),
 ]
@@ -1187,12 +1187,9 @@ KIND_NAMES = {
     "nudge_morning": "Напоминание (Утро)",
     "joke": "Плановая шутка",
     "nudge_midday": "Напоминание (Обед)",
-    "admin_midday_missing": "Отчёт должников в ЛС",
 }
 
 # ============================ ИМПОРТ ИСТОРИИ И ПЛАН ДНЯ ============================
-CONFIRM_WORDS = ("ок", "ok", "да", "+", "работаем", "подтверждаю", "start", "/resume")
-
 def joke_window_end(start: datetime) -> datetime:
     return start.replace(hour=13 if start.hour < 13 else 17, minute=0, second=0, microsecond=0)
 
@@ -1343,37 +1340,56 @@ def force_resume(n: datetime) -> None:
     save_state()
     RT.is_suspended = False
     RT.awaiting_history = False
-    RT.awaiting_confirmation = False
 
-# ============================ ОБРАБОТЧИК ЛИЧНЫХ СООБЩЕНИЙ ============================
+# ============================ ОБРАБОТЧИК ЛИЧНЫХ СООБЩЕНИЙ (ТОЛЬКО СОЗДАТЕЛЬ) ============================
 def admin_panel_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="👀 Показать шутку в очереди", callback_data="panel:queue")],
-        [InlineKeyboardButton(text="🔄 Заменить на неиспользованную", callback_data="panel:change")],
-        [InlineKeyboardButton(text="🚀 Отправить шутку принудительно", callback_data="panel:force")],
+        [
+            InlineKeyboardButton(text="▶️ Запустить", callback_data="admin:resume"),
+            InlineKeyboardButton(text="⏸ Пауза", callback_data="admin:pause")
+        ],
+        [
+            InlineKeyboardButton(text="📊 Статистика", callback_data="admin:stats"),
+            InlineKeyboardButton(text="📋 Должники", callback_data="admin:missing")
+        ],
+        [
+            InlineKeyboardButton(text="🔇 Мут (2ч)", callback_data="admin:mute"),
+            InlineKeyboardButton(text="🔊 Снять мут", callback_data="admin:unmute")
+        ],
+        [
+            InlineKeyboardButton(text="👀 Шутка в очереди", callback_data="panel:queue"),
+            InlineKeyboardButton(text="🔄 Заменить", callback_data="panel:change")
+        ],
+        [InlineKeyboardButton(text="🚀 Отправить шутку сейчас", callback_data="panel:force")],
+        [InlineKeyboardButton(text="💾 Скачать state.json", callback_data="admin:state")]
     ])
 
 def admin_panel_text(note: str | None = None) -> str:
     planned = queued_joke_for(now())
+    status = "🔴 НА ПАУЗЕ (Остановлен)" if RT.is_suspended else "🟢 АКТИВЕН (В работе)"
+    mute_status = "Выключен" if RT.mute_until < time.time() else datetime.fromtimestamp(RT.mute_until, TZ).strftime('%H:%M:%S')
+
     parts = [
-        "👑 Панель управления TOP TEAM",
-        "Доступ: только главный администратор.",
+        "👑 <b>Панель управления TOP TEAM</b>",
+        f"Статус бота: <b>{status}</b>",
+        f"Режим тишины: <b>{mute_status}</b>",
         "",
-        "🎭 Следующая шутка в очереди:",
-        planned,
+        "🎭 <b>Следующая шутка в очереди:</b>",
+        escape(planned) if planned else "Нет",
         "",
-        "Команды: /stats, /missing, /say текст, /joke, /mute 120, /unmute, /state, /resume",
-        "Историю чата можно отправить сюда в виде файла result.json (экспорт Telegram).",
-        "🔇 Жёсткий мут: бот не публикует текст в рабочем чате с 19:00 включительно; личное управление админом остаётся доступным.",
+        "<i>Отправьте /say [текст], чтобы написать в чат от имени бота.</i>",
+        "<i>Загрузите result.json для импорта истории. Жёсткий мут после 19:00 активен.</i>",
     ]
     if note:
-        parts = [note, ""] + parts
+        parts = [f"💬 <i>{escape(note)}</i>", ""] + parts
     return "\n".join(parts)
 
 @dp.message(F.document)
 async def handle_document(message: Message):
+    # Строгая проверка: общаться с ботом в ЛС может исключительно Создатель (ADMIN_ID)
     if message.chat.type != "private" or not message.from_user or message.from_user.id != ADMIN_ID:
         return
+        
     if message.document.file_name == "result.json":
         await message.reply("⏳ Загружаю и анализирую result.json...")
         try:
@@ -1388,13 +1404,8 @@ async def handle_document(message: Message):
                 await message.reply("❌ Не смог распознать сообщения или история пуста.")
                 return
             
-            if RT.is_suspended:
-                RT.awaiting_history = False
-                RT.awaiting_confirmation = True
-                tail = "⏳ Напиши <b>ок</b> или <b>да</b>, чтобы я перешел в автономный рабочий режим."
-            else:
-                tail = "▶️ Бот уже работает, график скорректирован."
-                
+            RT.awaiting_history = False
+            
             author = res.get("author", ("?", False))
             author_name = author[0]
             author_mgr = author[1]
@@ -1414,157 +1425,144 @@ async def handle_document(message: Message):
                              + (f"шутки не раньше {until.strftime('%H:%M')}." if until > n else "пауза 30 мин уже прошла."))
             if res["unknown"]:
                 lines.append("⚠️ Не опознал точки (пропущены): " + escape(", ".join(res["unknown"])))
-            lines += ["", "📋 <b>План действий на остаток дня:</b>", build_plan(n), "", tail]
-            await message.reply("\n".join(lines), parse_mode="HTML")
+            lines += ["", "📋 <b>План действий на остаток дня:</b>", build_plan(n), ""]
+            
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="▶️ Запустить в работу", callback_data="hist:start")],
+                [InlineKeyboardButton(text="⏸ Оставить на паузе", callback_data="hist:pause")]
+            ])
+            
+            await message.reply("\n".join(lines), parse_mode="HTML", reply_markup=keyboard)
         except Exception as e:
             log.exception("Ошибка обработки result.json")
             await message.reply(f"❌ Ошибка обработки файла: {e}")
 
 async def handle_private_message(message: Message) -> None:
     user = message.from_user
+    # СТРОГАЯ ЗАЩИТА: ТОЛЬКО СОЗДАТЕЛЬ ИМЕЕТ ДОСТУП К УПРАВЛЕНИЮ В ЛС
+    if not user or user.id != ADMIN_ID:
+        return
+
     text = (message.text or "").strip()
     low = text.lower()
-    is_admin = bool(user and user.id == ADMIN_ID)
 
-    if not is_admin:
-        return
-
-    if is_admin and RT.awaiting_confirmation and low in CONFIRM_WORDS:
-        RT.is_suspended = False
-        RT.awaiting_confirmation = False
-        await message.reply("🚀 <b>Подтверждение получено.</b> Перехожу в автономный режим, работаю по графику.", parse_mode="HTML")
-        return
-
-    if is_admin and low == "/resume":
-        n = now()
-        force_resume(n)
-        await message.reply("🚀 Автономный режим активирован принудительно. Слоты, время которых уже прошло, "
-                            "считаю отправленными.\n\n📋 План на остаток дня:\n" + build_plan(n))
-        return
-
-    if is_admin and RT.awaiting_history and RT.is_suspended and not text.startswith("/"):
-        await message.reply("Жду файл result.json (экспорт истории чата) или /resume для принудительного старта.")
-        return
-
-    if user and user.id not in HQ_USER_IDS and is_manager(user.full_name or "", user.id):
-        reply_text = pick_bag("bot_mention_manager", SITUATIONS["bot_mention_manager"])
-        await message.reply(reply_text)
-        return
-
-    if not user or user.id not in HQ_USER_IDS:
-        is_store = bool(user) and (user.id in STORE_BY_USER_ID)
-        if is_store:
-            reply_text = pick_bag("bot_mention_store", SITUATIONS["bot_mention_store"])
-        else:
-            reply_text = pick_bag("bot_mention_employee", SITUATIONS["bot_mention_employee"])
-        await message.reply(reply_text)
-        return
-
-    if low in ("/start", "/help"):
-        await message.reply(admin_panel_text(), reply_markup=admin_panel_keyboard())
-    elif low == "/stats":
-        bd = biz_date(now()).isoformat()
-        ent_m = day_entries(bd, "morning")
-        ent_d = day_entries(bd, "midday")
-        ent_e = day_entries(bd, "evening")
-        
-        mute_status = "Выключен"
-        if RT.mute_until > time.time():
-            mute_status = datetime.fromtimestamp(RT.mute_until, TZ).strftime('%H:%M:%S')
-            
-        await message.reply(
-            f"📊 <b>Статистика за сегодня ({bd}):</b>\n"
-            f"🌅 Утро: {len(ent_m)} отчётов\n"
-            f"☀️ Обед: {len(ent_d)} отчётов\n"
-            f"🌙 Вечер: {len(ent_e)} отчётов\n\n"
-            f"🎭 Шутки: по расписанию; после сообщения руководителя действует пауза 30 минут.\n"
-            f"🔇 Режим тишины активен до: {mute_status}",
-            parse_mode="HTML"
-        )
-    elif low == "/missing":
-        n = now()
-        bd = biz_date(n).isoformat()
-        lines = [f"📋 <b>Не сдали отчёты за {bd}:</b>"]
-        for win, title in (("morning", "Утро"), ("midday", "Обед"), ("evening", "Вечер")):
-            reported = set(day_entries(bd, win))
-            missing = sorted(expected_stores(win, bd) - reported)
-            lines.append(f"<b>{title} ({len(reported)}/{len(expected_stores(win, bd))}):</b> " + (", ".join(missing) if missing else "все сдали"))
-        await message.reply("\n".join(lines), parse_mode="HTML")
-    elif low.startswith("/say "):
+    if low.startswith("/say "):
         cid = get_chat_id()
         if not cid:
             await message.reply("❌ Не могу отправить: ID рабочего чата не задан.")
             return
+        if is_after_hard_mute():
+            await message.reply("❌ Отправка заблокирована правилом 19:00 (жёсткий мут).")
+            return
+            
         msg_to_send = text.replace("/say ", "", 1)
         sent = await send_chat_message(cid, msg_to_send)
-        await message.reply("✅ Отправлено в рабочий чат." if sent else "❌ Не удалось отправить сообщение в рабочий чат.")
-    elif low == "/joke":
-        if not in_joke_window(now()) or jokes_temporarily_paused():
-            await message.reply("⏰ Шутки доступны с 11:00 до 13:00 и с 15:00 до 17:00; после чека руководителя действует пауза 30 минут.")
-            return
-        cid = get_chat_id()
-        if not cid:
-            await message.reply("❌ ID рабочего чата не задан.")
-            return
-        joke = queued_joke_for(now())
-        sent = await send_chat_message(cid, joke)
-        if sent:
-            mark_joke_used(joke)
-            STATE["queued_joke"] = None
-            save_state()
-            await message.reply(f"✅ Шутка отправлена в чат:\n{escape(joke)}")
-        else:
-            await message.reply("❌ Не получилось отправить шутку в рабочий чат.")
-    elif low.startswith("/mute"):
-        parts = text.split()
-        minutes = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 60
-        mute_for(minutes)
-        await message.reply(f"🔇 Бот замолк на {minutes} минут.")
-    elif low == "/unmute":
-        RT.mute_until = 0.0
-        await message.reply("🔊 Режим тишины снят. Бот снова может шутить и комментировать.")
-    elif low == "/state":
-        try:
-            state_str = json.dumps(STATE, ensure_ascii=False, indent=2)
-            file = BufferedInputFile(state_str.encode('utf-8'), filename="state.json")
-            await message.reply_document(file, caption="Актуальный слепок базы данных")
-        except Exception as e:
-            await message.reply(f"❌ Ошибка выгрузки: {e}")
-    else:
-        await message.reply("Неизвестная команда. Нажмите /help")
+        await message.reply("✅ Отправлено в рабочий чат." if sent else "❌ Не удалось отправить сообщение.")
+        return
 
-# ============================ CALLBACKS АДМИНА ============================
+    # На любые другие текстовые сообщения в ЛС создателю выводим удобную панель меню
+    await message.reply(admin_panel_text(), parse_mode="HTML", reply_markup=admin_panel_keyboard())
+
+# ============================ CALLBACKS СОЗДАТЕЛЯ ============================
 @dp.callback_query()
 async def on_callback_query(callback: CallbackQuery) -> None:
     data = callback.data or ""
     if not callback.from_user or callback.from_user.id != ADMIN_ID:
-        await callback.answer("Эта кнопка доступна только главному администратору.", show_alert=True)
+        await callback.answer("Нет доступа.", show_alert=True)
         return
+        
+    n = now()
     try:
+        if data == "hist:start":
+            force_resume(n)
+            await callback.message.edit_reply_markup(reply_markup=None)
+            await callback.message.reply("🚀 <b>Бот запущен в работу по графику.</b>", parse_mode="HTML", reply_markup=admin_panel_keyboard())
+            await callback.answer("Запущен")
+            return
+        if data == "hist:pause":
+            RT.is_suspended = True
+            await callback.message.edit_reply_markup(reply_markup=None)
+            await callback.message.reply("⏸ <b>Бот оставлен на паузе.</b> Реплики отправляться не будут.", parse_mode="HTML", reply_markup=admin_panel_keyboard())
+            await callback.answer("На паузе")
+            return
+
+        if data == "admin:resume":
+            force_resume(n)
+            await callback.message.edit_text(admin_panel_text("Бот запущен!"), parse_mode="HTML", reply_markup=admin_panel_keyboard())
+            await callback.answer("Запущен")
+            return
+        if data == "admin:pause":
+            RT.is_suspended = True
+            await callback.message.edit_text(admin_panel_text("Бот поставлен на паузу!"), parse_mode="HTML", reply_markup=admin_panel_keyboard())
+            await callback.answer("Пауза")
+            return
+        if data == "admin:mute":
+            mute_for(120)
+            await callback.message.edit_text(admin_panel_text("Мут включен на 2 часа."), parse_mode="HTML", reply_markup=admin_panel_keyboard())
+            await callback.answer("Включен режим тишины")
+            return
+        if data == "admin:unmute":
+            RT.mute_until = 0.0
+            await callback.message.edit_text(admin_panel_text("Мут отключен."), parse_mode="HTML", reply_markup=admin_panel_keyboard())
+            await callback.answer("Режим тишины снят")
+            return
+            
+        if data == "admin:stats":
+            bd = biz_date(n).isoformat()
+            ent_m = day_entries(bd, "morning")
+            ent_d = day_entries(bd, "midday")
+            ent_e = day_entries(bd, "evening")
+            text = (f"📊 <b>Статистика за сегодня ({bd}):</b>\n"
+                    f"🌅 Утро: {len(ent_m)}\n☀️ Обед: {len(ent_d)}\n🌙 Вечер: {len(ent_e)}")
+            await callback.message.reply(text, parse_mode="HTML")
+            await callback.answer()
+            return
+            
+        if data == "admin:missing":
+            bd = biz_date(n).isoformat()
+            lines = [f"📋 <b>Не сдали отчёты за {bd}:</b>"]
+            for win, title in (("morning", "Утро"), ("midday", "Обед"), ("evening", "Вечер")):
+                reported = set(day_entries(bd, win))
+                missing = sorted(expected_stores(win, bd) - reported)
+                lines.append(f"<b>{title} ({len(reported)}/{len(expected_stores(win, bd))}):</b> " + (", ".join(missing) if missing else "все сдали"))
+            await callback.message.reply("\n".join(lines), parse_mode="HTML")
+            await callback.answer()
+            return
+            
+        if data == "admin:state":
+            state_str = json.dumps(STATE, ensure_ascii=False, indent=2)
+            file = BufferedInputFile(state_str.encode('utf-8'), filename="state.json")
+            await callback.message.reply_document(file, caption="Актуальный state.json")
+            await callback.answer()
+            return
+
         if data == "panel:queue":
-            await callback.message.edit_text(admin_panel_text("👀 Текущая очередь показана ниже:"),
-                                             reply_markup=admin_panel_keyboard())
-            await callback.answer("Очередь обновлена")
+            await callback.message.edit_text(admin_panel_text("👀 Очередь обновлена:"), parse_mode="HTML", reply_markup=admin_panel_keyboard())
+            await callback.answer()
             return
+            
         if data == "panel:change":
-            replacement = replace_queued_joke(now())
+            replacement = replace_queued_joke(n)
             if replacement is None:
-                await callback.answer("Пока нет другой неиспользованной шутки для замены.", show_alert=True)
+                await callback.answer("Нет свободных шуток для замены.", show_alert=True)
                 return
-            await callback.message.edit_text(admin_panel_text("🔄 Шутка заменена на ещё не использованную:"),
-                                             reply_markup=admin_panel_keyboard())
-            await callback.answer("Очередь обновлена")
+            await callback.message.edit_text(admin_panel_text("🔄 Шутка заменена:"), parse_mode="HTML", reply_markup=admin_panel_keyboard())
+            await callback.answer("Заменено")
             return
+            
         if data == "panel:force":
+            if is_after_hard_mute():
+                await callback.answer("❌ Заблокировано: после 19:00 действует жёсткий мут.", show_alert=True)
+                return
             if jokes_temporarily_paused():
                 until = datetime.fromtimestamp(RT.jokes_paused_until, TZ).strftime("%H:%M")
-                await callback.answer(f"Пауза после сообщения руководителя действует до {until}.", show_alert=True)
+                await callback.answer(f"Пауза после руководителя до {until}.", show_alert=True)
                 return
             cid = get_chat_id()
             if cid is None:
-                await callback.answer("Не задан CHAT_ID рабочего чата.", show_alert=True)
+                await callback.answer("Не задан CHAT_ID.", show_alert=True)
                 return
-            joke = queued_joke_for(now())
+            joke = queued_joke_for(n)
             sent = await send_chat_message(cid, joke)
             if not sent:
                 await callback.answer("Не удалось отправить шутку.", show_alert=True)
@@ -1572,43 +1570,41 @@ async def on_callback_query(callback: CallbackQuery) -> None:
             mark_joke_used(joke)
             STATE["queued_joke"] = None
             save_state()
-            await callback.message.edit_text(admin_panel_text(f"✅ Шутка отправлена принудительно:\n{joke}"),
-                                             reply_markup=admin_panel_keyboard())
-            await callback.answer("Шутка отправлена")
+            await callback.message.edit_text(admin_panel_text("✅ Шутка отправлена в чат!"), parse_mode="HTML", reply_markup=admin_panel_keyboard())
+            await callback.answer("Отправлено")
             return
+
         if data.startswith("rv:"):
             _, action, token = (data.split(":", 2) + [""])[:3]
             pending = STATE.setdefault("review_pending", {}).get(token)
             if not pending:
-                await callback.answer("Эта запись уже обработана или устарела.", show_alert=True)
+                await callback.answer("Запись устарела.", show_alert=True)
                 return
             original = pending.get("text", "")
             if action == "k":
                 STATE["review_pending"].pop(token, None)
                 save_state()
-                display = original[:3600] + ("…\n[текст сокращён]" if len(original) > 3600 else "")
-                await callback.message.edit_text(f"✅ Оставлено в рабочем чате:\n\n{display}", reply_markup=None)
+                await callback.message.edit_text(f"✅ Оставлено:\n\n{original[:3600]}")
                 await callback.answer("Оставлено")
                 return
             if action == "d":
                 try:
                     await bot.delete_message(int(pending["chat_id"]), int(pending["message_id"]))
-                except Exception as e:
-                    log.warning("Админ не смог удалить сообщение %s из чата: %s", pending.get("message_id"), e)
-                    await callback.answer("Не удалось удалить сообщение. Проверьте права бота в группе.", show_alert=True)
+                except Exception:
+                    await callback.answer("Не удалось удалить сообщение в чате.", show_alert=True)
                     return
                 STATE["review_pending"].pop(token, None)
                 save_state()
-                display = original[:3600] + ("…\n[текст сокращён]" if len(original) > 3600 else "")
-                await callback.message.edit_text(f"🗑 Удалено из рабочего чата:\n\n{display}", reply_markup=None)
-                await callback.answer("Сообщение удалено из чата")
+                await callback.message.edit_text(f"🗑 Удалено:\n\n{original[:3600]}")
+                await callback.answer("Удалено")
                 return
+
         await callback.answer()
     except Exception:
-        log.exception("Ошибка обработки кнопки администратора")
+        log.exception("Ошибка обработки кнопки")
         try:
-            await callback.answer("Ошибка обработки действия. Подробности записаны в лог.", show_alert=True)
-        except Exception:
+            await callback.answer("Произошла ошибка.", show_alert=True)
+        except:
             pass
 
 # ============================ ГЛАВНЫЙ ОБРАБОТЧИК (ЧАТЫ) ============================
@@ -1760,33 +1756,18 @@ async def on_edited(message: Message):
     except Exception:
         log.exception("Ошибка обработки правки")
 
-def missing_text(window: str, n: datetime, label: str, full_list: bool = False):
+def missing_text(window: str, n: datetime, label: str):
     today = biz_date(n).isoformat()
     reported = set(day_entries(today, window))
     expected = expected_stores(window, today)
     miss = sorted(expected - reported)
     if miss:
-        if not full_list and len(miss) > 8:
-            shown = ", ".join(miss[:8])
-            more = f" и ещё {len(miss) - 8}"
-        else:
-            shown = ", ".join(miss)
-            more = ""
+        shown = ", ".join(miss[:8])
+        more = f" и ещё {len(miss) - 8}" if len(miss) > 8 else ""
         return f"{label} ещё ждём от: {shown}{more}."
     return None
 
 async def run_slot(kind: str, fallback: bool, n: datetime) -> str:
-    if kind == "admin_midday_missing":
-        text = missing_text("midday", n, "⏳ Не сдали обеденный отчёт (на 14:00)", full_list=True)
-        if not text:
-            text = "✅ Все магазины сдали обеденные отчёты до 14:00."
-        for uid in HQ_USER_IDS:
-            try:
-                await bot.send_message(uid, text)
-            except Exception:
-                pass
-        return "sent"
-
     jokes_kind = kind == "joke" or fallback
     critical_reminder = kind in ("nudge_morning", "nudge_midday")
     if not can_speak(n, jokes=False, ignore_mute=critical_reminder):
@@ -1865,7 +1846,7 @@ async def tick() -> None:
 async def scheduler_loop() -> None:
     while True:
         try:
-            if not RT.is_suspended:
+            if not RT.is_suspended and not is_after_hard_mute():
                 await tick()
         except Exception:
             log.exception("Ошибка планировщика")
@@ -1903,8 +1884,9 @@ async def main() -> None:
             "🔄 <b>Я только что перезапустился!</b>\n\n"
             "Скинь мне файл result.json (экспорт истории из Telegram Desktop), "
             "чтобы я всё актуализировал и не наспамил ложными напоминаниями.\n\n"
-            "<i>(Если свежей истории нет, просто напиши /resume для принудительного старта)</i>.",
-            parse_mode="HTML"
+            "<i>(Если свежей истории нет, используй интерактивные кнопки ниже для управления)</i>.",
+            parse_mode="HTML",
+            reply_markup=admin_panel_keyboard()
         )
     except Exception as e:
         log.warning(f"Не удалось отправить уведомление админу {ADMIN_ID} о рестарте: {e}")
