@@ -3,6 +3,7 @@
 TOP TEAM - рабочий бот для чата 16 магазинов (Сота Альянс, Одесский регион).
 Обновленная версия: жесткая защита ЛС (только Создатель), интерактивное меню,
 выбор «Запустить» / «Пауза» при загрузке истории и защита от отправок после 19:00.
+Добавлена обработка медиафайлов руководителя в истории и вайб-чек шуток.
 """
 from __future__ import annotations
 
@@ -574,6 +575,19 @@ TECH_REPLIES = [
     "🏚️ Моя история с 1С закончилась, но последствия остались. Если она у вас тоже чудит - пора звать айти."
 ]
 
+ZOOMER_PHRASES = [
+    "Окей, я понял. Эту кринжатину удаляю. 🤡",
+    "Сорян, шутка не зашла, сношу. 🚮",
+    "Моя шутка собрала больше отказов, чем кредиты в таргете. Стер. 🏦",
+    "Минус вайб поймал. Делитнул от греха подальше. 📉",
+    "Понял-принял, шутка оказалась с браком, оформляю возврат по чеку. ♻️",
+    "Скипаем этот кринж. Я просто тестил вашу бдительность. 👀",
+    "Вайб-чек шутки не пройден. Отмена операции. 🚫",
+    "Я понял, снес этот кринж, забыли 🙄",
+    "Кажется, я перегрелся с юмором. Делитнул, делаем вид, что этого не было. 🫠",
+    "Ладно-ладно, душнить не надо. Убрал. 🙄"
+]
+
 SITUATIONS = {
     "bot_mention_manager": [
         "Упс, кажется, мои нейроны перегрелись. Ушел к IT-отделу на диагностику, скоро вернусь! 🔧",
@@ -1118,7 +1132,7 @@ async def on_reaction(ev: MessageReactionUpdated):
                 await bot.delete_message(ev.chat.id, ev.message_id)
                 del RT.bot_msgs[ev.message_id]
                 mute_for(120) 
-                await send_chat_message(ev.chat.id, "🤡 Понял, шутка не зашла. Удалил и ушел в режим тишины.")
+                await send_chat_message(ev.chat.id, random.choice(ZOOMER_PHRASES))
                 return
 
     except Exception as e:
@@ -1248,8 +1262,6 @@ def import_history_json(data: dict, n: datetime):
             text_str = str(raw_text)
             
         text_str = text_str.strip()
-        if not text_str:
-            continue
             
         date_str = msg.get("date")
         try:
@@ -1265,17 +1277,19 @@ def import_history_json(data: dict, n: datetime):
             latest = dt
             latest_author = (sender, mgr_msg)
             
+        if mgr_msg:
+            if last_mgr is None or dt >= last_mgr[0]:
+                last_mgr = (dt, sender)
+        
+        if not text_str:
+            continue
+            
         if bot_msg:
             bot_all.append(dt)
             bot_jokes.append((dt, text_str))
             is_reply = bool(msg.get("reply_to_message_id"))
             if not is_reply:
                 bot_slot_times.append(dt)
-            continue
-            
-        if mgr_msg:
-            if last_mgr is None or dt >= last_mgr[0]:
-                last_mgr = (dt, sender)
             continue
             
         rep = parse_report(text_str)
