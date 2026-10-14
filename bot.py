@@ -6,6 +6,7 @@ TOP TEAM - рабочий бот для чата 16 магазинов (Сота
 Добавлена обработка медиафайлов руководителя в истории и вайб-чек шуток.
 Внедрен динамический банк утренних приветствий и "Зоркий глаз" (👀 на правки).
 Внедрены Аналитика Вайба, Точечный Пуш должников и Пасхалки на красивые цифры.
+Автозакрытие должников при 1 неизвестном отчете, расчет реального времени шуток и кнопка Обновить.
 """
 from __future__ import annotations
 
@@ -687,11 +688,11 @@ SITUATIONS = {
         "Сорри, но я dead inside. Отвечаю только на факты и cover'и чеки. 💀",
         "Запрет на неформальное общение. Я тут онли ворк, ноу плей. 💼",
         "Моя нейросеть сейчас занята более важными делами (я в спящем режиме). 😴",
-        "Отвечать людям - это так в стиле 2021 года. Я в эре молчания. 💅",
+        "Отвечаю людям - это так в стиле 2021 года. Я в эре молчания. 💅",
         "Я тут purely for vibes и сбора отчетов. Иди делай кассу. ✨",
         "Мой алгоритм подсказывает, что кому-то пора проверить остатки на витрине. 📦",
         "Хватит тегать бота, лучше тегни клиента на оплату частями. 💳",
-        "Я бы пошутил в ответ, но твои продажи за сегодня уже достаточно смешные. (Шучу, иди работай). 🤡",
+        "Я бы пошутил в ответ, но твои продаж за сегодня уже достаточно смешные. (Шучу, иди работай). 🤡",
         "Такое ощущение, что я работаю больше тебя. А я даже не получаю ЗП. 💸",
         "Ты тратишь калории на печать текста боту, а мог бы потратить их на продажу пленки. 🛡️",
         "Да-да, я очень интересный бот. А теперь вернись в реальность и найди покупателя. 🚶",
@@ -1050,6 +1051,35 @@ def replace_queued_joke(n: datetime | None = None) -> str | None:
     save_state()
     return STATE["queued_joke"]
 
+def get_next_joke_time(n: datetime) -> str:
+    if is_after_hard_mute():
+        return "⏸ Пауза (Хард-мут до утра)"
+    if RT.is_suspended:
+        return "⏸ Бот остановлен"
+        
+    done = STATE["done"].get(n.date().isoformat(), [])
+    for slot_id, h, m, kind, _ in SLOTS:
+        if kind == "joke" and slot_id not in done:
+            planned = n.replace(hour=h, minute=m, second=0, microsecond=0)
+            
+            if n >= min(planned + timedelta(minutes=JOKE_MAX_DELAY_MIN), joke_window_end(planned)):
+                continue
+                
+            actual = max(n, planned)
+            if RT.jokes_paused_until and time.time() < RT.jokes_paused_until:
+                actual = max(actual, datetime.fromtimestamp(RT.jokes_paused_until, TZ))
+            if RT.mute_until and time.time() < RT.mute_until:
+                actual = max(actual, datetime.fromtimestamp(RT.mute_until, TZ))
+            
+            if actual > n:
+                return f"🕒 Ожидает тайминга: {actual.strftime('%H:%M')}"
+            
+            if not can_speak(n, gap=True, jokes=True):
+                return "⏳ Время пришло (Жду активности чата / снятия мута)"
+            return "🚀 Время пришло (отправит при следующем сообщении в чат)"
+            
+    return "🏁 Все шутки на сегодня отправлены или просрочены"
+
 # ============================ РЕАКЦИИ НА ОТЧЁТЫ ============================
 def report_reactions(window: str, pct, closed: bool) -> list:
     if window == "morning":
@@ -1166,7 +1196,6 @@ async def on_reaction(ev: MessageReactionUpdated):
             new_emojis = {r.emoji for r in ev.new_reaction if isinstance(r, ReactionTypeEmoji)}
             msg_data = RT.bot_msgs[ev.message_id]
             
-            # Обратная совместимость для старых словарей во время рестарта
             if isinstance(msg_data, set):
                 msg_data = {"neg": msg_data, "text": ""}
                 RT.bot_msgs[ev.message_id] = msg_data
@@ -1431,8 +1460,8 @@ def admin_panel_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="🎯 Точечный пуш", callback_data="admin:push")
         ],
         [
-            InlineKeyboardButton(text="📊 Статистика", callback_data="admin:stats"),
-            InlineKeyboardButton(text="📋 Должники", callback_data="admin:missing")
+            InlineKeyboardButton(text="📋 Должники (Отчёты)", callback_data="admin:missing"),
+            InlineKeyboardButton(text="🔄 Обновить инфу", callback_data="admin:update")
         ],
         [
             InlineKeyboardButton(text="🔇 Мут (2ч)", callback_data="admin:mute"),
@@ -1449,12 +1478,11 @@ def admin_panel_keyboard() -> InlineKeyboardMarkup:
 def admin_panel_text(note: str | None = None) -> str:
     planned = queued_joke_for(now())
     status = "🔴 НА ПАУЗЕ (Остановлен)" if RT.is_suspended else "🟢 АКТИВЕН (В работе)"
-    mute_status = "Выключен" if RT.mute_until < time.time() else datetime.fromtimestamp(RT.mute_until, TZ).strftime('%H:%M:%S')
 
     parts = [
         "👑 <b>Панель управления TOP TEAM</b>",
         f"Статус бота: <b>{status}</b>",
-        f"Режим тишины: <b>{mute_status}</b>",
+        f"⏱ <b>Статус отправки шутки:</b> {get_next_joke_time(now())}",
         "",
         "🎭 <b>Следующая шутка в очереди:</b>",
         escape(planned) if planned else "Нет",
@@ -1654,15 +1682,9 @@ async def on_callback_query(callback: CallbackQuery) -> None:
             await callback.answer()
             return
 
-        if data == "admin:stats":
-            bd = biz_date(n).isoformat()
-            ent_m = day_entries(bd, "morning")
-            ent_d = day_entries(bd, "midday")
-            ent_e = day_entries(bd, "evening")
-            text = (f"📊 <b>Статистика за сегодня ({bd}):</b>\n"
-                    f"🌅 Утро: {len(ent_m)}\n☀️ Обед: {len(ent_d)}\n🌙 Вечер: {len(ent_e)}")
-            await callback.message.reply(text, parse_mode="HTML")
-            await callback.answer()
+        if data == "admin:update":
+            await callback.message.edit_text(admin_panel_text("🔄 Данные обновлены"), parse_mode="HTML", reply_markup=admin_panel_keyboard())
+            await callback.answer("Обновлено")
             return
             
         if data == "admin:missing":
@@ -1835,7 +1857,6 @@ async def process(message: Message, edited: bool) -> None:
             if not edited and not RT.is_suspended:
                 await handle_report(message, store, window, rep, dt)
             elif edited and not RT.is_suspended:
-                # Реакция на редактирование ("Зоркий глаз") с защитой от спама на руководителей
                 if not is_manager(name, user.id) and user.id != ADMIN_ID:
                     await react(message, ["👀"])
             return
@@ -1907,8 +1928,28 @@ async def on_edited(message: Message):
     except Exception:
         log.exception("Ошибка обработки правки")
 
+def auto_assign_unknown_reports(window: str, today: str) -> bool:
+    all_reports = day_entries(today, window)
+    reported_stores = set(all_reports.keys())
+    unidentified = [s for s in reported_stores if s not in STORE_NAMES]
+    expected = expected_stores(window, today)
+    known_reported = reported_stores.intersection(STORE_NAMES)
+    missing = sorted(expected - known_reported)
+
+    if len(missing) == 1 and len(unidentified) == 1:
+        unknown_key = unidentified[0]
+        missing_store = missing[0]
+        day_data = STATE["history"][today]
+        day_data.setdefault(missing_store, {})[window] = day_data[unknown_key].pop(window)
+        if not day_data[unknown_key]:
+            del day_data[unknown_key]
+        save_state()
+        return True
+    return False
+
 def missing_text(window: str, n: datetime, label: str):
     today = biz_date(n).isoformat()
+    auto_assign_unknown_reports(window, today)
     reported = set(day_entries(today, window))
     expected = expected_stores(window, today)
     miss = sorted(expected - reported)
@@ -1927,6 +1968,7 @@ async def run_slot(kind: str, fallback: bool, n: datetime) -> str:
     if kind in ("nudge_morning", "nudge_midday"):
         window = "morning" if kind == "nudge_morning" else "midday"
         today = biz_date(n).isoformat()
+        auto_assign_unknown_reports(window, today)
         all_reports = day_entries(today, window)
         unidentified = [s for s in all_reports if s not in STORE_NAMES]
         if unidentified:
