@@ -67,7 +67,7 @@ HISTORY_DEBOUNCE_SEC = 4.0
 HISTORY_CONTINUE_SEC = 120.0    
 BOSS_MARKERS = ("гусев", "стелла яссин")
 SILENT_USER_IDS = {486540367}
-MANAGER_REACTIONS = ["👍", "🔥", "🫡", "✍️", "🏆", "❤️"]
+MANAGER_REACTIONS = ["👍", "🔥", "🫡", "🫡", "🫡", "❤️"]
 
 STORE_BY_USER_ID = {
     1083997329: "Преображенська 52",
@@ -1052,26 +1052,53 @@ def replace_queued_joke(n: datetime | None = None) -> str | None:
     return STATE["queued_joke"]
 
 # ============================ РЕАКЦИИ НА ОТЧЁТЫ ============================
+# Логика реакций основана на анализе 30 395 отчётов из истории чата.
+# Утро: только ✅ (галочка — подтверждение).
+# Обед и Вечер: реакция зависит от % выполнения плана (факт/план * 100):
+#   100%+  → 🔥 + 👍 (самые частые в истории при перевыполнении)
+#   80-99% → ❤ + 👍 + 🔥 (тепло + уважение)
+#   50-79% → ❤ + 👍 (поддержка)
+#   25-49% → ❤ + 👍 (нейтрально-поддерживающие)
+#   <25%   → ❤ + 😢 (сочувствие, без осуждения)
+#   нет %  → 👍
+# Вечер дополнительно: при 100%+ добавляется 🏆 если >150%, при очень низком результате — 🤯
 def report_reactions(window: str, pct, closed: bool) -> list:
     if window == "morning":
         return ["✅"]
-    if closed or (pct is not None and pct >= 100):
-        return ["🔥", "🎉", "🤩", "🏆", "💯"] if (pct or 100) < 200 else ["🔥", "🏆", "🤩", "💯"]
+
+    # Закрыт план явно (строка с «+»)
+    if closed:
+        return ["🔥", "👍", "❤"]
+
     if pct is None:
         return ["👍"]
+
     if window == "midday":
+        # Обед — промежуточный срез, поддерживающие реакции
+        if pct >= 100:
+            return ["🔥", "👍", "❤"]
         if pct >= 80:
-            return ["🔥", "👍", "⚡"]
+            return ["❤", "👍", "🔥"]
         if pct >= 50:
-            return ["🔥", "😎", "👏"]
+            return ["❤", "👍"]
         if pct >= 25:
-            return ["👍", "🤝", "👌"]
-        return ["👀", "🫡", "🤝"]
-    if pct >= 70:
-        return ["👍", "🤝", "👌", "⚡"]
-    if pct >= 40:
-        return ["👀", "🫡", "🤝"]
-    return ["👍", "🤝"]
+            return ["❤", "👍"]
+        # Очень мало в обед — сочувствие + мотивация
+        return ["❤", "😢", "🤯"]
+
+    # Вечер — итоговый результат, более яркие реакции
+    if pct >= 150:
+        return ["🔥", "👍", "❤", "🏆"]
+    if pct >= 100:
+        return ["🔥", "👍", "❤"]
+    if pct >= 80:
+        return ["❤", "👍", "🔥"]
+    if pct >= 50:
+        return ["❤", "👍"]
+    if pct >= 25:
+        return ["❤", "👍"]
+    # Провальный вечер — сочувствие
+    return ["❤", "😢", "🤯"]
 
 def maybe_reset_day_counters(n: datetime) -> None:
     d = n.date().isoformat()
@@ -1087,7 +1114,13 @@ async def handle_report(message: Message, store: str, window: str, rep: dict, dt
     n = now()
     if n.hour >= SPEAK_UNTIL[0] and not REACT_AFTER_HOURS:
         return
-    asyncio.create_task(react(message, report_reactions(window, rep["pct"], rep["closed"])))
+    # Если % не вычислен, но есть план и факт — считаем сами
+    pct = rep["pct"]
+    if pct is None and rep.get("plan") and rep.get("fact") is not None and rep["plan"] > 0:
+        pct = rep["fact"] / rep["plan"] * 100.0
+
+    # Утро → ✅, обед/вечер → умная реакция по результату
+    asyncio.create_task(react(message, report_reactions(window, pct, rep["closed"])))
     
     # Пасхалки на красивые цифры ТО (План/Факт)
     if can_speak(n, gap=False) and not RT.is_suspended:
@@ -1126,8 +1159,12 @@ async def diag(message: Message, cmd: str) -> None:
         who = (src.from_user.full_name if src.from_user else "?")
         dt = n if TEST_MODE else (src.date.astimezone(TZ) if src.date else n)
         window = classify_window(dt)
-        pool = report_reactions(window, rep["pct"], rep["closed"])
-        pct = "-" if rep["pct"] is None else f"{rep['pct']:.0f}%"
+        # Вычисляем % как в handle_report
+        pct_val = rep["pct"]
+        if pct_val is None and rep.get("plan") and rep.get("fact") is not None and rep["plan"] > 0:
+            pct_val = rep["fact"] / rep["plan"] * 100.0
+        pool = report_reactions(window, pct_val, rep["closed"])
+        pct = "-" if pct_val is None else f"{pct_val:.0f}%"
 
         is_late = False
         minutes = dt.hour * 60 + dt.minute
