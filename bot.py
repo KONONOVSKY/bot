@@ -97,7 +97,7 @@ STORE_NAMES = tuple(dict.fromkeys(STORE_BY_USER_ID.values()))
 
 ALLOWED = {
     "👍", "🔥", "🎉", "🤩", "😎", "🏆", "💯", "⚡", "🤝", "👌", "🫡", "🤗", "🙏", "👀",
-    "🤡", "🙈", "🥱", "🤨", "🍾", "❤", "🤣", "😁", "👏", "💅", "🦄", "🗿",
+    "🤡", "🙈", "🥱", "🤨", "🍾", "❤", "🤣", "😁", "👏", "💅", "🦄", "🗿", "✅"
 }
 POSITIVE = {"👍", "🔥", "❤", "🎉", "🤩", "😎", "👏", "💯", "⚡", "🏆"}
 NEGATIVE = {"👎", "🤡", "💩", "🥱", "🤮", "🤬", "🤨"}
@@ -1053,7 +1053,7 @@ def replace_queued_joke(n: datetime | None = None) -> str | None:
 # ============================ РЕАКЦИИ НА ОТЧЁТЫ ============================
 def report_reactions(window: str, pct, closed: bool) -> list:
     if window == "morning":
-        return ["👍", "😎", "🤝", "🫡"]
+        return ["✅"]
     if closed or (pct is not None and pct >= 100):
         return ["🔥", "🎉", "🤩", "🏆", "💯"] if (pct or 100) < 200 else ["🔥", "🏆", "🤩", "💯"]
     if pct is None:
@@ -1923,6 +1923,21 @@ async def run_slot(kind: str, fallback: bool, n: datetime) -> str:
     critical_reminder = kind in ("nudge_morning", "nudge_midday")
     if not can_speak(n, jokes=False, ignore_mute=critical_reminder):
         return "retry"
+
+    if kind in ("nudge_morning", "nudge_midday"):
+        window = "morning" if kind == "nudge_morning" else "midday"
+        today = biz_date(n).isoformat()
+        all_reports = day_entries(today, window)
+        unidentified = [s for s in all_reports if s not in STORE_NAMES]
+        if unidentified:
+            msg = (f"⚠️ <b>Внимание (окно {window})</b>\n"
+                   f"Всего отчетов: {len(all_reports)}/16\n"
+                   f"Не идентифицированы как магазины: {len(unidentified)}\n"
+                   f"Отправители: {', '.join(unidentified)}")
+            try:
+                await bot.send_message(ADMIN_ID, msg, parse_mode="HTML")
+            except Exception as e:
+                log.warning(f"Не удалось отправить сводку админу: {e}")
     
     text, html = None, False
     is_joke = False
