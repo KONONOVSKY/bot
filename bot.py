@@ -651,7 +651,7 @@ SITUATIONS = {
         "Магазин, вы крутые. Оставляю вас наедине с выполнением плана! 🌈",
         "Ваш бот-помощник на связи. Фиксирую вашу активность и жду жирных чеков! 💸",
         "Привет-привет! Моя база данных готова к вашим вечерним отчетам. Не подведите! 📊",
-        "Я всегда тут, на фоне. Работайте спокойно, я всё посчитаю. 🧮",
+        "Я always тут, на фоне. Работайте спокойно, я всё посчитаю. 🧮",
         "Спасибо, что помните про бота! Возвращаю вам лучи поддержки и лояльных клиентов. ✨",
         "Контакт есть! А теперь идем конвертировать этот контакт в продажу! 🤝"
     ],
@@ -1052,23 +1052,17 @@ def replace_queued_joke(n: datetime | None = None) -> str | None:
 def report_reactions(window: str, pct, closed: bool) -> list:
     if window == "morning":
         return ["✅"]
-    if closed or (pct is not None and pct >= 100):
-        return ["🔥", "🎉", "🤩", "🏆", "💯"] if (pct or 100) < 200 else ["🔥", "🏆", "🤩", "💯"]
+        
     if pct is None:
-        return ["👍"]
-    if window == "midday":
-        if pct >= 80:
-            return ["🔥", "❤️", "❤️"]
-        if pct >= 50:
-            return ["👍", "👍", "❤️"]
-        if pct >= 25:
-            return ["👍", "🤝", "❤️"]
-        return ["😔", "🫡", "🤝"]
-    if pct >= 70:
-        return ["👍", "🤝", "👌", "👌"]
-    if pct >= 40:
-        return ["😔", "🤝", "🤝"]
-    return ["🤝", "🤝"]
+        return ["🤝", "🤝"]
+        
+    if closed or pct >= 100:
+        return ["🔥", "🔥", "🤩", "🔥", "🔥", "🤩", "🔥"]
+        
+    if pct >= 60:
+        return ["👍", "🤝", "👌", "👍", "🤝", "❤"]
+        
+    return ["😔", "😔", "😔", "😔", "😔", "😔"]
 
 def maybe_reset_day_counters(n: datetime) -> None:
     d = n.date().isoformat()
