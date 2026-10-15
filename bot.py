@@ -1,12 +1,8 @@
 # -*- coding: utf-8 -*-
 """
 TOP TEAM - рабочий бот для чата 16 магазинов (Сота Альянс, Одесский регион).
-Обновленная версия: жесткая защита ЛС (только Создатель), интерактивное меню,
-выбор «Запустить» / «Пауза» при загрузке истории и защита от отправок после 19:00.
-Добавлена обработка медиафайлов руководителя в истории и вайб-чек шуток.
-Внедрен динамический банк утренних приветствий и "Зоркий глаз" (👀 на правки).
-Внедрены Аналитика Вайба, Точечный Пуш должников и Пасхалки на красивые цифры.
-Добавлена отсечка спама по квоте 16 отчетов.
+Обновленная версия: жесткая защита ЛС (только Создатель), категорийное меню ЛС,
+режимы работы (Нормальный, Без шуток 24ч, Полный стоп) и принудительная отправка шуток в общий чат.
 """
 from __future__ import annotations
 
@@ -140,7 +136,8 @@ def classify_window(dt: datetime) -> str:
 STATE: dict = {
     "chat_id": None, "history": {}, "bags": {}, "done": {},
     "jokes_used": [], "queued_joke": None, "review_pending": {},
-    "tech_reply_date": "", "fans": {}
+    "tech_reply_date": "", "fans": {},
+    "jokes_disabled_until": 0.0, "full_stop": False
 }
 
 class RT:
@@ -470,7 +467,7 @@ JOKES = {
         "📚 Стажёр ОФ2 выучил характеристики всех смартфонов, условия страховок, сервисы, правила кредитования и процедуру возврата. На следующий день ему сказали, что сегодня он наставник. Парень ещё даже не понял, где у него испытательный срок закончился.",
         "🌀 На Королёва Киевстар однажды открыли дверь в подсобку, а там оказался Белгород-Днестровский. Артамонов сказал, что это обычное перемещение.",
         "🎯Гусев обучает так, что один стажёр пришёл домой и предложил настройку роутера, когда родители попросили включить интернет.",
-        "📡 Супервайзеры Киевстара, Водафона и Лайфа одновременно пришли на одну точку. Продавец оформил три операторских плана, два смартфона и случайно открыл четвёртого оператора — себя.",
+        "📡 Супервайзеры Киевстара, Водафона и Лайфа одновременно пришли на одну точку. Продавец оформил три операторских плана, два смартфона и случайно открыл четвёртого оператора - себя.",
         "🪑 АХО приехали чинить стул на Глушко. Выяснилось, что стул требует согласования с регионалом, подтверждения от бухгалтерии и одобрения трёх операторов. Стул оформил увольнение.",
         "📱 Если Артамонов провел перемещение сразу, не расслабляйся. Скорее всего, он перепутал магазины.",
         "📲 «А зарядка в комплекте?» - вопрос, который заставляет её оттуда убрать",
@@ -1052,53 +1049,26 @@ def replace_queued_joke(n: datetime | None = None) -> str | None:
     return STATE["queued_joke"]
 
 # ============================ РЕАКЦИИ НА ОТЧЁТЫ ============================
-# Логика реакций основана на анализе 30 395 отчётов из истории чата.
-# Утро: только ✅ (галочка — подтверждение).
-# Обед и Вечер: реакция зависит от % выполнения плана (факт/план * 100):
-#   100%+  → 🔥 + 👍 (самые частые в истории при перевыполнении)
-#   80-99% → ❤ + 👍 + 🔥 (тепло + уважение)
-#   50-79% → ❤ + 👍 (поддержка)
-#   25-49% → ❤ + 👍 (нейтрально-поддерживающие)
-#   <25%   → ❤ + 😢 (сочувствие, без осуждения)
-#   нет %  → 👍
-# Вечер дополнительно: при 100%+ добавляется 🏆 если >150%, при очень низком результате — 🤯
 def report_reactions(window: str, pct, closed: bool) -> list:
     if window == "morning":
         return ["✅"]
-
-    # Закрыт план явно (строка с «+»)
-    if closed:
-        return ["🔥", "👍", "❤"]
-
+    if closed or (pct is not None and pct >= 100):
+        return ["🔥", "🎉", "🤩", "🏆", "💯"] if (pct or 100) < 200 else ["🔥", "🏆", "🤩", "💯"]
     if pct is None:
         return ["👍"]
-
     if window == "midday":
-        # Обед — промежуточный срез, поддерживающие реакции
-        if pct >= 100:
-            return ["🔥", "👍", "❤"]
         if pct >= 80:
-            return ["❤", "👍", "🔥"]
+            return ["🔥", "👍", "⚡"]
         if pct >= 50:
-            return ["❤", "👍"]
+            return ["🔥", "😎", "👏"]
         if pct >= 25:
-            return ["❤", "👍"]
-        # Очень мало в обед — сочувствие + мотивация
-        return ["❤", "😢", "🤯"]
-
-    # Вечер — итоговый результат, более яркие реакции
-    if pct >= 150:
-        return ["🔥", "👍", "❤", "🏆"]
-    if pct >= 100:
-        return ["🔥", "👍", "❤"]
-    if pct >= 80:
-        return ["❤", "👍", "🔥"]
-    if pct >= 50:
-        return ["❤", "👍"]
-    if pct >= 25:
-        return ["❤", "👍"]
-    # Провальный вечер — сочувствие
-    return ["❤", "😢", "🤯"]
+            return ["👍", "🤝", "👌"]
+        return ["👀", "🫡", "🤝"]
+    if pct >= 70:
+        return ["👍", "🤝", "👌", "⚡"]
+    if pct >= 40:
+        return ["👀", "🫡", "🤝"]
+    return ["👍", "🤝"]
 
 def maybe_reset_day_counters(n: datetime) -> None:
     d = n.date().isoformat()
@@ -1114,16 +1084,10 @@ async def handle_report(message: Message, store: str, window: str, rep: dict, dt
     n = now()
     if n.hour >= SPEAK_UNTIL[0] and not REACT_AFTER_HOURS:
         return
-    # Если % не вычислен, но есть план и факт — считаем сами
-    pct = rep["pct"]
-    if pct is None and rep.get("plan") and rep.get("fact") is not None and rep["plan"] > 0:
-        pct = rep["fact"] / rep["plan"] * 100.0
-
-    # Утро → ✅, обед/вечер → умная реакция по результату
-    asyncio.create_task(react(message, report_reactions(window, pct, rep["closed"])))
+    asyncio.create_task(react(message, report_reactions(window, rep["pct"], rep["closed"])))
     
     # Пасхалки на красивые цифры ТО (План/Факт)
-    if can_speak(n, gap=False) and not RT.is_suspended:
+    if can_speak(n, gap=False) and not STATE.get("full_stop", False) and not RT.is_suspended:
         magic_triggered = False
         for val in (rep.get("plan"), rep.get("fact")):
             if not val:
@@ -1159,12 +1123,8 @@ async def diag(message: Message, cmd: str) -> None:
         who = (src.from_user.full_name if src.from_user else "?")
         dt = n if TEST_MODE else (src.date.astimezone(TZ) if src.date else n)
         window = classify_window(dt)
-        # Вычисляем % как в handle_report
-        pct_val = rep["pct"]
-        if pct_val is None and rep.get("plan") and rep.get("fact") is not None and rep["plan"] > 0:
-            pct_val = rep["fact"] / rep["plan"] * 100.0
-        pool = report_reactions(window, pct_val, rep["closed"])
-        pct = "-" if pct_val is None else f"{pct_val:.0f}%"
+        pool = report_reactions(window, rep["pct"], rep["closed"])
+        pct = "-" if rep["pct"] is None else f"{rep['pct']:.0f}%"
 
         is_late = False
         minutes = dt.hour * 60 + dt.minute
@@ -1204,7 +1164,6 @@ async def on_reaction(ev: MessageReactionUpdated):
             new_emojis = {r.emoji for r in ev.new_reaction if isinstance(r, ReactionTypeEmoji)}
             msg_data = RT.bot_msgs[ev.message_id]
             
-            # Обратная совместимость для старых словарей во время рестарта
             if isinstance(msg_data, set):
                 msg_data = {"neg": msg_data, "text": ""}
                 RT.bot_msgs[ev.message_id] = msg_data
@@ -1257,6 +1216,9 @@ async def handle_command(message: Message, cmd: str) -> None:
     if cmd == "/help" or cmd == "/start":
         await say(HELP_TEXT, message)
     elif cmd == "/joke":
+        if STATE.get("jokes_disabled_until", 0.0) > time.time():
+            await react(message, ["🤫"])
+            return
         if time.time() - RT.last_bot > 120 and not jokes_temporarily_paused():
             joke = queued_joke_for(n)
             if await say(joke, message, track_deletable=True):
@@ -1453,52 +1415,78 @@ def force_resume(n: datetime) -> None:
     for slot_id, h, minute, _, _ in SLOTS:
         if n.replace(hour=h, minute=minute, second=0, microsecond=0) <= n:
             mark_slot_done(done, slot_id)
+    STATE["full_stop"] = False
+    STATE["jokes_disabled_until"] = 0.0
     save_state()
     RT.is_suspended = False
     RT.awaiting_history = False
 
-# ============================ ОБРАБОТЧИК ЛИЧНЫХ СООБЩЕНИЙ ============================
-def admin_panel_keyboard() -> InlineKeyboardMarkup:
+# ============================ КЛАВИАТУРЫ И МЕНЮ ЛС ============================
+def admin_main_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="▶️ Запустить", callback_data="admin:resume"),
-            InlineKeyboardButton(text="⏸ Пауза", callback_data="admin:pause")
-        ],
-        [
-            InlineKeyboardButton(text="📊 Аналитика вайба", callback_data="admin:vibe"),
-            InlineKeyboardButton(text="🎯 Точечный пуш", callback_data="admin:push")
-        ],
-        [
-            InlineKeyboardButton(text="📊 Статистика", callback_data="admin:stats"),
-            InlineKeyboardButton(text="📋 Должники", callback_data="admin:missing")
-        ],
-        [
-            InlineKeyboardButton(text="🔇 Мут (2ч)", callback_data="admin:mute"),
-            InlineKeyboardButton(text="🔊 Снять мут", callback_data="admin:unmute")
-        ],
-        [
-            InlineKeyboardButton(text="👀 Шутка в очереди", callback_data="panel:queue"),
-            InlineKeyboardButton(text="🔄 Заменить", callback_data="panel:change")
-        ],
-        [InlineKeyboardButton(text="🚀 Отправить шутку сейчас", callback_data="panel:force")],
+        [InlineKeyboardButton(text="⚙️ Режимы работы", callback_data="menu:modes")],
+        [InlineKeyboardButton(text="🎭 Шутки и Очередь", callback_data="menu:jokes")],
+        [InlineKeyboardButton(text="📊 Отчёты и Пуш", callback_data="menu:reports")],
         [InlineKeyboardButton(text="💾 Скачать state.json", callback_data="admin:state")]
+    ])
+
+def admin_modes_keyboard() -> InlineKeyboardMarkup:
+    jokes_dis = STATE.get("jokes_disabled_until", 0.0) > time.time()
+    full_stop = STATE.get("full_stop", False) or RT.is_suspended
+    
+    lbl_norm = "🟢 Нормальный режим" + (" (активен)" if not jokes_dis and not full_stop else "")
+    lbl_nojokes = "🤫 Без шуток (24ч)" + (" (активен)" if jokes_dis and not full_stop else "")
+    lbl_stop = "🔴 Полный стоп" + (" (активен)" if full_stop else "")
+    
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=lbl_norm, callback_data="mode:normal")],
+        [InlineKeyboardButton(text=lbl_nojokes, callback_data="mode:no_jokes")],
+        [InlineKeyboardButton(text=lbl_stop, callback_data="mode:full_stop")],
+        [InlineKeyboardButton(text="🔙 Главное меню", callback_data="menu:main")]
+    ])
+
+def admin_jokes_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="👀 Шутка в очереди", callback_data="panel:queue")],
+        [InlineKeyboardButton(text="🔄 Заменить шутку", callback_data="panel:change")],
+        [InlineKeyboardButton(text="🚀 Отправить шутку сейчас в чат", callback_data="panel:force")],
+        [InlineKeyboardButton(text="🔙 Главное меню", callback_data="menu:main")]
+    ])
+
+def admin_reports_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📊 Аналитика вайба", callback_data="admin:vibe")],
+        [InlineKeyboardButton(text="🎯 Точечный пуш должников", callback_data="admin:push")],
+        [InlineKeyboardButton(text="📊 Статистика за сегодня", callback_data="admin:stats")],
+        [InlineKeyboardButton(text="📋 Должники списком", callback_data="admin:missing")],
+        [InlineKeyboardButton(text="🔙 Главное меню", callback_data="menu:main")]
     ])
 
 def admin_panel_text(note: str | None = None) -> str:
     planned = queued_joke_for(now())
-    status = "🔴 НА ПАУЗЕ (Остановлен)" if RT.is_suspended else "🟢 АКТИВЕН (В работе)"
+    full_stop = STATE.get("full_stop", False) or RT.is_suspended
+    jokes_disabled = STATE.get("jokes_disabled_until", 0.0) > time.time()
+    
+    if full_stop:
+        status = "🔴 ПОЛНЫЙ СТОП (Все функции выключены)"
+    elif jokes_disabled:
+        until_dt = datetime.fromtimestamp(STATE["jokes_disabled_until"], TZ).strftime("%H:%M (%d.%m)")
+        status = f"🤫 БЕЗ ШУТОК (До {until_dt}). Отчёты и напоминания работают"
+    else:
+        status = "🟢 НОРМАЛЬНЫЙ (Всё работает по расписанию)"
+        
     mute_status = "Выключен" if RT.mute_until < time.time() else datetime.fromtimestamp(RT.mute_until, TZ).strftime('%H:%M:%S')
 
     parts = [
         "👑 <b>Панель управления TOP TEAM</b>",
-        f"Статус бота: <b>{status}</b>",
-        f"Режим тишины: <b>{mute_status}</b>",
+        f"Режим бота: <b>{status}</b>",
+        f"Режим тишины (мут): <b>{mute_status}</b>",
         "",
         "🎭 <b>Следующая шутка в очереди:</b>",
         escape(planned) if planned else "Нет",
         "",
-        "<i>Отправьте /say [текст], чтобы написать в чат от имени бота.</i>",
-        "<i>Загрузите result.json для импорта истории. Жёсткий мут после 19:00 активен.</i>",
+        "<i>Используйте категории ниже для настройки бота.</i>",
+        "<i>Отправьте /say [текст], чтобы написать в рабочий чат от имени бота.</i>",
     ]
     if note:
         parts = [f"💬 <i>{escape(note)}</i>", ""] + parts
@@ -1580,7 +1568,7 @@ async def handle_private_message(message: Message) -> None:
             await message.reply("✅ Отправлено в рабочий чат." if sent else "❌ Не удалось отправить сообщение.")
             return
 
-        await message.reply(admin_panel_text(), parse_mode="HTML", reply_markup=admin_panel_keyboard())
+        await message.reply(admin_panel_text(), parse_mode="HTML", reply_markup=admin_main_keyboard())
         return
 
     # Защита от спама (Flood Control) в ЛС - 1 ответ раз в 5 секунд для обычных пользователей
@@ -1608,40 +1596,109 @@ async def on_callback_query(callback: CallbackQuery) -> None:
         
     n = now()
     try:
+        # Навигация по меню
+        if data == "menu:main":
+            await callback.message.edit_text(admin_panel_text(), parse_mode="HTML", reply_markup=admin_main_keyboard())
+            await callback.answer()
+            return
+        if data == "menu:modes":
+            await callback.message.edit_text(admin_panel_text(), parse_mode="HTML", reply_markup=admin_modes_keyboard())
+            await callback.answer()
+            return
+        if data == "menu:jokes":
+            await callback.message.edit_text(admin_panel_text(), parse_mode="HTML", reply_markup=admin_jokes_keyboard())
+            await callback.answer()
+            return
+        if data == "menu:reports":
+            await callback.message.edit_text(admin_panel_text(), parse_mode="HTML", reply_markup=admin_reports_keyboard())
+            await callback.answer()
+            return
+
+        # Переключение режимов работы
+        if data == "mode:normal":
+            STATE["full_stop"] = False
+            STATE["jokes_disabled_until"] = 0.0
+            RT.is_suspended = False
+            save_state()
+            await callback.message.edit_text(admin_panel_text("Переключено на Нормальный режим!"), parse_mode="HTML", reply_markup=admin_modes_keyboard())
+            await callback.answer("Нормальный режим")
+            return
+            
+        if data == "mode:no_jokes":
+            STATE["full_stop"] = False
+            STATE["jokes_disabled_until"] = time.time() + 86400.0
+            RT.is_suspended = False
+            save_state()
+            await callback.message.edit_text(admin_panel_text("Режим 'Без шуток' включен на 24 часа!"), parse_mode="HTML", reply_markup=admin_modes_keyboard())
+            await callback.answer("Без шуток на 24ч")
+            return
+            
+        if data == "mode:full_stop":
+            STATE["full_stop"] = True
+            RT.is_suspended = True
+            save_state()
+            await callback.message.edit_text(admin_panel_text("Полный стоп активирован! Все функции выключены."), parse_mode="HTML", reply_markup=admin_modes_keyboard())
+            await callback.answer("Полный стоп")
+            return
+
+        # Обработка загрузки истории
         if data == "hist:start":
+            STATE["full_stop"] = False
+            STATE["jokes_disabled_until"] = 0.0
             force_resume(n)
             await callback.message.edit_reply_markup(reply_markup=None)
-            await callback.message.reply("🚀 <b>Бот запущен в работу по графику.</b>", parse_mode="HTML", reply_markup=admin_panel_keyboard())
+            await callback.message.reply("🚀 <b>Бот запущен в работу по графику.</b>", parse_mode="HTML", reply_markup=admin_main_keyboard())
             await callback.answer("Запущен")
             return
         if data == "hist:pause":
+            STATE["full_stop"] = True
             RT.is_suspended = True
+            save_state()
             await callback.message.edit_reply_markup(reply_markup=None)
-            await callback.message.reply("⏸ <b>Бот оставлен на паузе.</b> Реплики отправляться не будут.", parse_mode="HTML", reply_markup=admin_panel_keyboard())
+            await callback.message.reply("⏸ <b>Бот оставлен на паузе.</b> Реплики отправляться не будут.", parse_mode="HTML", reply_markup=admin_main_keyboard())
             await callback.answer("На паузе")
             return
 
-        if data == "admin:resume":
-            force_resume(n)
-            await callback.message.edit_text(admin_panel_text("Бот запущен!"), parse_mode="HTML", reply_markup=admin_panel_keyboard())
-            await callback.answer("Запущен")
-            return
-        if data == "admin:pause":
-            RT.is_suspended = True
-            await callback.message.edit_text(admin_panel_text("Бот поставлен на паузу!"), parse_mode="HTML", reply_markup=admin_panel_keyboard())
-            await callback.answer("Пауза")
-            return
-        if data == "admin:mute":
-            mute_for(120)
-            await callback.message.edit_text(admin_panel_text("Мут включен на 2 часа."), parse_mode="HTML", reply_markup=admin_panel_keyboard())
-            await callback.answer("Включен режим тишины")
-            return
-        if data == "admin:unmute":
-            RT.mute_until = 0.0
-            await callback.message.edit_text(admin_panel_text("Мут отключен."), parse_mode="HTML", reply_markup=admin_panel_keyboard())
-            await callback.answer("Режим тишины снят")
+        # Шутки и очередь
+        if data == "panel:queue":
+            await callback.message.edit_text(admin_panel_text("👀 Очередь обновлена:"), parse_mode="HTML", reply_markup=admin_jokes_keyboard())
+            await callback.answer()
             return
             
+        if data == "panel:change":
+            replacement = replace_queued_joke(n)
+            if replacement is None:
+                await callback.answer("Нет свободных шуток для замены.", show_alert=True)
+                return
+            await callback.message.edit_text(admin_panel_text("🔄 Шутка заменена:"), parse_mode="HTML", reply_markup=admin_jokes_keyboard())
+            await callback.answer("Заменено")
+            return
+            
+        if data == "panel:force":
+            if is_after_hard_mute():
+                await callback.answer("❌ Заблокировано: после 19:00 действует жёсткий мут.", show_alert=True)
+                return
+            if jokes_temporarily_paused():
+                until = datetime.fromtimestamp(RT.jokes_paused_until, TZ).strftime("%H:%M")
+                await callback.answer(f"Пауза после руководителя до {until}.", show_alert=True)
+                return
+            cid = get_chat_id()
+            if cid is None:
+                await callback.answer("Не задан CHAT_ID.", show_alert=True)
+                return
+            joke = queued_joke_for(n)
+            sent = await send_chat_message(cid, joke)
+            if not sent:
+                await callback.answer("Не удалось отправить шутку в рабочий чат.", show_alert=True)
+                return
+            mark_joke_used(joke)
+            STATE["queued_joke"] = None
+            save_state()
+            await callback.message.edit_text(admin_panel_text("✅ Шутка отправлена в рабочий чат!"), parse_mode="HTML", reply_markup=admin_jokes_keyboard())
+            await callback.answer("Отправлено в чат!")
+            return
+
+        # Раздел отчётов и аналитики
         if data == "admin:vibe":
             fans = STATE.setdefault("fans", {})
             top_fans = sorted(fans.items(), key=lambda x: -x[1])[:3]
@@ -1652,7 +1709,7 @@ async def on_callback_query(callback: CallbackQuery) -> None:
             jokes_text = "\n\n".join(f"💬 «{escape(j.get('t', j.get('n', ''))[:60])}...»\n❤️ Лайков: {j.get('likes')}" for j in top_jokes) if top_jokes else "Пока нет данных"
             
             msg = f"📊 <b>Аналитика вайба</b>\n\n🏆 <b>Топ-3 фаната бота:</b>\n{fans_text}\n\n🎭 <b>Топ шуток (из недавних):</b>\n{jokes_text}"
-            await callback.message.edit_text(msg, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data="admin:back")]]))
+            await callback.message.edit_text(msg, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data="menu:reports")]]))
             await callback.answer()
             return
 
@@ -1676,7 +1733,7 @@ async def on_callback_query(callback: CallbackQuery) -> None:
             for m in miss:
                 safe_name = m[:30]
                 kb.append([InlineKeyboardButton(text=m, callback_data=f"push:{safe_name}")])
-            kb.append([InlineKeyboardButton(text="🔙 Назад", callback_data="admin:back")])
+            kb.append([InlineKeyboardButton(text="🔙 Назад", callback_data="menu:reports")])
             await callback.message.edit_text("🎯 Выберите должника для пуша (по текущему периоду):", reply_markup=InlineKeyboardMarkup(inline_keyboard=kb))
             await callback.answer()
             return
@@ -1688,13 +1745,8 @@ async def on_callback_query(callback: CallbackQuery) -> None:
                 await callback.answer("ID чата не настроен.", show_alert=True)
                 return
             await send_chat_message(cid, f"{store_name}, я всё вижу! Где отчёт? 👀")
-            await callback.message.edit_text(f"✅ Пуш отправлен магазину {escape(store_name)}!", parse_mode="HTML", reply_markup=admin_panel_keyboard())
+            await callback.message.edit_text(f"✅ Пуш отправлен магазину {escape(store_name)}!", parse_mode="HTML", reply_markup=admin_reports_keyboard())
             await callback.answer("Отправлено")
-            return
-            
-        if data == "admin:back":
-            await callback.message.edit_text(admin_panel_text(), parse_mode="HTML", reply_markup=admin_panel_keyboard())
-            await callback.answer()
             return
 
         if data == "admin:stats":
@@ -1727,44 +1779,6 @@ async def on_callback_query(callback: CallbackQuery) -> None:
             file = BufferedInputFile(state_str.encode('utf-8'), filename="state.json")
             await callback.message.reply_document(file, caption="Актуальный state.json")
             await callback.answer()
-            return
-
-        if data == "panel:queue":
-            await callback.message.edit_text(admin_panel_text("👀 Очередь обновлена:"), parse_mode="HTML", reply_markup=admin_panel_keyboard())
-            await callback.answer()
-            return
-            
-        if data == "panel:change":
-            replacement = replace_queued_joke(n)
-            if replacement is None:
-                await callback.answer("Нет свободных шуток для замены.", show_alert=True)
-                return
-            await callback.message.edit_text(admin_panel_text("🔄 Шутка заменена:"), parse_mode="HTML", reply_markup=admin_panel_keyboard())
-            await callback.answer("Заменено")
-            return
-            
-        if data == "panel:force":
-            if is_after_hard_mute():
-                await callback.answer("❌ Заблокировано: после 19:00 действует жёсткий мут.", show_alert=True)
-                return
-            if jokes_temporarily_paused():
-                until = datetime.fromtimestamp(RT.jokes_paused_until, TZ).strftime("%H:%M")
-                await callback.answer(f"Пауза после руководителя до {until}.", show_alert=True)
-                return
-            cid = get_chat_id()
-            if cid is None:
-                await callback.answer("Не задан CHAT_ID.", show_alert=True)
-                return
-            joke = queued_joke_for(n)
-            sent = await send_chat_message(cid, joke)
-            if not sent:
-                await callback.answer("Не удалось отправить шутку.", show_alert=True)
-                return
-            mark_joke_used(joke)
-            STATE["queued_joke"] = None
-            save_state()
-            await callback.message.edit_text(admin_panel_text("✅ Шутка отправлена в чат!"), parse_mode="HTML", reply_markup=admin_panel_keyboard())
-            await callback.answer("Отправлено")
             return
 
         if data.startswith("rv:"):
@@ -1802,6 +1816,9 @@ async def on_callback_query(callback: CallbackQuery) -> None:
 
 # ============================ ГЛАВНЫЙ ОБРАБОТЧИК (ЧАТЫ) ============================
 async def process(message: Message, edited: bool) -> None:
+    if STATE.get("full_stop", False):
+        return
+        
     chat = message.chat
     if chat.type not in ("group", "supergroup"):
         return
@@ -1881,7 +1898,6 @@ async def process(message: Message, edited: bool) -> None:
             if not edited and not RT.is_suspended:
                 await handle_report(message, store, window, rep, dt)
             elif edited and not RT.is_suspended:
-                # Реакция на редактирование ("Зоркий глаз") с защитой от спама на руководителей
                 if not is_manager(name, user.id) and user.id != ADMIN_ID:
                     await react(message, ["👀"])
             return
@@ -1969,8 +1985,15 @@ def missing_text(window: str, n: datetime, label: str):
     return None
 
 async def run_slot(kind: str, fallback: bool, n: datetime) -> str:
+    if STATE.get("full_stop", False):
+        return "skip"
+
     jokes_kind = kind == "joke" or fallback
     critical_reminder = kind in ("nudge_morning", "nudge_midday")
+
+    if jokes_kind and STATE.get("jokes_disabled_until", 0.0) > time.time():
+        return "skip"
+
     if not can_speak(n, jokes=False, ignore_mute=critical_reminder):
         return "retry"
 
@@ -2064,7 +2087,7 @@ async def tick() -> None:
 async def scheduler_loop() -> None:
     while True:
         try:
-            if not RT.is_suspended and not is_after_hard_mute():
+            if not STATE.get("full_stop", False) and not RT.is_suspended and not is_after_hard_mute():
                 await tick()
         except Exception:
             log.exception("Ошибка планировщика")
@@ -2104,7 +2127,7 @@ async def main() -> None:
             "чтобы я всё актуализировал и не наспамил ложными напоминаниями.\n\n"
             "<i>(Если свежей истории нет, используй интерактивные кнопки ниже для управления)</i>.",
             parse_mode="HTML",
-            reply_markup=admin_panel_keyboard()
+            reply_markup=admin_main_keyboard()
         )
     except Exception as e:
         log.warning(f"Не удалось отправить уведомление админу {ADMIN_ID} о рестарте: {e}")
