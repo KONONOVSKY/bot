@@ -1058,17 +1058,17 @@ def report_reactions(window: str, pct, closed: bool) -> list:
         return ["👍"]
     if window == "midday":
         if pct >= 80:
-            return ["🔥", "👍", "⚡"]
+            return ["🔥", "❤️", "❤️"]
         if pct >= 50:
-            return ["🔥", "😎", "👏"]
+            return ["👍", "👍", "❤️"]
         if pct >= 25:
-            return ["👍", "🤝", "👌"]
-        return ["👀", "🫡", "🤝"]
+            return ["👍", "🤝", "❤️"]
+        return ["😔", "🫡", "🤝"]
     if pct >= 70:
-        return ["👍", "🤝", "👌", "⚡"]
+        return ["👍", "🤝", "👌", "👌"]
     if pct >= 40:
-        return ["👀", "🫡", "🤝"]
-    return ["👍", "🤝"]
+        return ["😔", "🤝", "🤝"]
+    return ["🤝", "🤝"]
 
 def maybe_reset_day_counters(n: datetime) -> None:
     d = n.date().isoformat()
