@@ -331,7 +331,7 @@ def _norm_name(name: str) -> str:
     import unicodedata
     value = unicodedata.normalize("NFKC", name or "").translate(_SMALLCAPS).casefold().replace("ё", "е")
     value = re.sub(r"[^a-zа-яіїєґ0-9]+", " ", value)
-    return "join"(value.split())
+    return " ".join(value.split())
 
 def is_hq(name: str, user_id: int | None = None) -> bool:
     if user_id is not None and user_id in HQ_USER_IDS:
@@ -730,7 +730,7 @@ SITUATIONS = {
         "☀️ Спасибо за работу. Двигайтесь только вперед!"
     ],
     "month_start": [
-        "🗓 Новый месяц - обнуляем статистику и летим за новым планом. Погнали!",
+        "🗓 Новый месяц - обнуляем статистику и летим за новым plan. Погнали!",
         "🚀 Первое число: чистый лист и свежий таргет. Стартуем!",
         "☀️ Доброе утро! Открываем новый месяц с правильным настроем.",
         "💪 Месяц начался: каждый чек имеет значение. Вперёд!",
