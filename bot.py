@@ -3,7 +3,7 @@
 TOP TEAM - рабочий бот для чата 16 магазинов (Сота Альянс, Одесский регион).
 Обновленная версия: жесткая защита ЛС (только Создатель), категорийное меню ЛС,
 режимы работы (Нормальный, Без шуток (тумблер), Полный стоп) и принудительная отправка шуток в общий чат.
-Включает расширенную дневную и недельную статистику с публикацией в чат.
+Включает расширенную дневную и недельную статистику с публикацией в чат, а также функцию умного пуша должников в ЛС.
 """
 from __future__ import annotations
 
@@ -92,6 +92,7 @@ ALIASES = {
 }
 
 STORE_NAMES = tuple(dict.fromkeys(STORE_BY_USER_ID.values()))
+USER_ID_BY_STORE = {v: k for k, v in STORE_BY_USER_ID.items()}
 
 ALLOWED = {
     "👍", "🔥", "🎉", "🤩", "😎", "🏆", "💯", "⚡", "🤝", "👌", "🫡", "🤗", "🙏", "👀",
@@ -139,7 +140,7 @@ STATE: dict = {
     "jokes_used": [], "queued_joke": None, "review_pending": {},
     "tech_reply_date": "", "fans": {},
     "jokes_disabled": False, "full_stop": False,
-    "queued_stats": None
+    "queued_stats": None, "pm_push_enabled": True, "pending_report_push": {}
 }
 
 class RT:
@@ -159,8 +160,8 @@ class RT:
     bot_username = ""
     bot_name_norm = ""
     pm_last_reply: dict = {}
-    group_mentions: list = []           # история времени тегов бота
-    ignore_mentions_until: float = 0.0  # таймер 10-минутного игнора
+    group_mentions: list = []           
+    ignore_mentions_until: float = 0.0  
 
 def load_state() -> None:
     try:
@@ -1261,7 +1262,7 @@ SLOTS = [
 KIND_NAMES = {
     "greeting": "Утреннее приветствие",
     "nudge_morning": "Напоминание (Утро)",
-    "joke": "Плаடியே шутка",
+    "joke": "Плановая шутка",
     "nudge_midday": "Напоминание (Обед)",
 }
 
@@ -1452,7 +1453,9 @@ def admin_jokes_keyboard() -> InlineKeyboardMarkup:
     ])
 
 def admin_reports_keyboard() -> InlineKeyboardMarkup:
+    pm_push_label = "Вкл (ЛС)" if STATE.get("pm_push_enabled", True) else "Выкл (Общий чат)"
     return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=f"🔀 Пуш должников в ЛС: {pm_push_label}", callback_data="admin:toggle_pm_push")],
         [InlineKeyboardButton(text="📊 Аналитика вайба", callback_data="admin:vibe")],
         [InlineKeyboardButton(text="🎯 Точечный пуш должников", callback_data="admin:push")],
         [InlineKeyboardButton(text="📊 Статистика за сегодня", callback_data="admin:stats")],
@@ -1565,6 +1568,17 @@ async def handle_private_message(message: Message) -> None:
             await message.reply("✅ Отправлено в рабочий чат." if sent else "❌ Не удалось отправить сообщение.")
             return
 
+        if low.startswith("/pm "):
+            try:
+                parts = text.split(" ", 2)
+                target_id = int(parts[1])
+                msg_to_send = parts[2]
+                await bot.send_message(target_id, f"👤 <b>Сообщение от Руководителя:</b>\n\n{msg_to_send}", parse_mode="HTML")
+                await message.reply(f"✅ Ответ успешно отправлен магазину (ID: {target_id}).")
+            except Exception:
+                await message.reply("❌ Ошибка формата или отправки. Используй: /pm ID текст")
+            return
+
         await message.reply(admin_panel_text(), parse_mode="HTML", reply_markup=admin_main_keyboard())
         return
 
@@ -1580,7 +1594,36 @@ async def handle_private_message(message: Message) -> None:
         await message.reply(pick_bag("bot_mention_manager", SITUATIONS["bot_mention_manager"]))
         return
 
-    # 3. Логика Сотрудников
+    # 3. Перехват ответа на пуш (Магазины)
+    if user.id in STORE_BY_USER_ID:
+        pending_pushes = STATE.get("pending_report_push", {})
+        # Если магазин находится в списке недавних пушей (до 2 часов)
+        if user.id in pending_pushes and time.time() - pending_pushes[user.id] < 7200:
+            store_name = STORE_BY_USER_ID[user.id]
+            msg_text = message.text or message.caption or ""
+            
+            # Пересылаем ответ Создателю
+            await bot.send_message(
+                ADMIN_ID,
+                f"📨 <b>Ответ на пуш от {store_name} (ID: <code>{user.id}</code>):</b>\n\n{escape(msg_text)}\n\n<i>Для ответа используй команду:</i>\n<code>/pm {user.id} твой текст</code>",
+                parse_mode="HTML"
+            )
+            
+            # Универсальный ответ магазину (выбираем случайно)
+            universal_replies = [
+                "🫡 Принял информацию! Ждем отчет в рабочем чате.",
+                "⏳ Понял. Как появится возможность — ждем цифры в группе!",
+                "Информацию зафиксировал. Не забудьте продублировать отчет в общий чат! 📊",
+                "Принято! Главное — не забудьте отправить итоговые цифры в рабочую группу. 🎯"
+            ]
+            await message.reply(random.choice(universal_replies))
+            
+            # Снимаем метку ожидания, чтобы избежать зацикливания ответов
+            STATE["pending_report_push"].pop(user.id)
+            save_state()
+            return
+
+    # 4. Логика Сотрудников (стандартные сообщения)
     await message.reply(pick_bag("bot_mention_employee", SITUATIONS["bot_mention_employee"]))
 
 # ============================ CALLBACKS СОЗДАТЕЛЯ ============================
@@ -1701,6 +1744,13 @@ async def on_callback_query(callback: CallbackQuery) -> None:
             return
 
         # Раздел отчётов и аналитики
+        if data == "admin:toggle_pm_push":
+            STATE["pm_push_enabled"] = not STATE.get("pm_push_enabled", True)
+            save_state()
+            await callback.message.edit_reply_markup(reply_markup=admin_reports_keyboard())
+            await callback.answer("Настройка режима пуша сохранена")
+            return
+
         if data == "admin:vibe":
             fans = STATE.setdefault("fans", {})
             top_fans = sorted(fans.items(), key=lambda x: -x[1])[:3]
@@ -1742,13 +1792,31 @@ async def on_callback_query(callback: CallbackQuery) -> None:
             
         if data.startswith("push:"):
             store_name = data.split(":", 1)[1]
-            cid = get_chat_id()
-            if not cid:
-                await callback.answer("ID чата не настроен.", show_alert=True)
-                return
-            await send_chat_message(cid, f"{store_name}, я всё вижу! Где отчёт? 👀")
-            await callback.message.edit_text(f"✅ Пуш отправлен магазину {escape(store_name)}!", parse_mode="HTML", reply_markup=admin_reports_keyboard())
-            await callback.answer("Отправлено")
+            pm_push = STATE.get("pm_push_enabled", True)
+            
+            if pm_push:
+                target_id = USER_ID_BY_STORE.get(store_name)
+                if not target_id:
+                    await callback.answer("❌ ID магазина не найден в базе.", show_alert=True)
+                    return
+                    
+                try:
+                    await bot.send_message(target_id, "⏳ Напоминаю: время сдавать отчёт. Жду цифры в общем чате!")
+                    STATE.setdefault("pending_report_push", {})[target_id] = time.time()
+                    save_state()
+                    
+                    await callback.message.edit_text(f"✅ Пуш отправлен в ЛС магазину {escape(store_name)}!", parse_mode="HTML", reply_markup=admin_reports_keyboard())
+                    await callback.answer("Отправлено в ЛС")
+                except Exception as e:
+                    await callback.answer("❌ Ошибка! Бот заблокирован магазином в ЛС.", show_alert=True)
+            else:
+                cid = get_chat_id()
+                if not cid:
+                    await callback.answer("ID чата не настроен.", show_alert=True)
+                    return
+                await send_chat_message(cid, f"{store_name}, я всё вижу! Где отчёт? 👀")
+                await callback.message.edit_text(f"✅ Пуш отправлен в общий чат магазину {escape(store_name)}!", parse_mode="HTML", reply_markup=admin_reports_keyboard())
+                await callback.answer("Отправлено в общий чат")
             return
 
         if data == "admin:stats":
@@ -2091,21 +2159,6 @@ async def on_edited(message: Message):
     except Exception:
         log.exception("Ошибка обработки правки")
 
-def missing_text(window: str, n: datetime, label: str):
-    today = biz_date(n).isoformat()
-    reported = set(day_entries(today, window))
-    
-    if len(reported) >= 16:
-        return None
-        
-    expected = expected_stores(window, today)
-    miss = sorted(expected - reported)
-    if miss:
-        shown = ", ".join(miss[:8])
-        more = f" и ещё {len(miss) - 8}" if len(miss) > 8 else ""
-        return f"{label} ещё ждём от: {shown}{more}."
-    return None
-
 async def run_slot(kind: str, fallback: bool, n: datetime) -> str:
     if STATE.get("full_stop", False):
         return "skip"
@@ -2119,38 +2172,69 @@ async def run_slot(kind: str, fallback: bool, n: datetime) -> str:
     if not can_speak(n, jokes=False, ignore_mute=critical_reminder):
         return "retry"
 
-    if kind in ("nudge_morning", "nudge_midday"):
-        window = "morning" if kind == "nudge_morning" else "midday"
-        today = biz_date(n).isoformat()
-        all_reports = day_entries(today, window)
-        unidentified = [s for s in all_reports if s not in STORE_NAMES]
-        
-        if unidentified:
-            status_text = "✅ Квота 16 отчетов закрыта, пуш отменен" if len(all_reports) >= 16 else "⚠️ Пуш отправлен в чат"
-            msg = (f"📊 <b>Сводка (окно {window})</b>\n"
-                   f"Собрано отчетов: {len(all_reports)}/16\n"
-                   f"Статус: {status_text}\n"
-                   f"Не идентифицированы как магазины ({len(unidentified)} шт): {', '.join(unidentified)}")
-            try:
-                await bot.send_message(ADMIN_ID, msg, parse_mode="HTML")
-            except Exception as e:
-                log.warning(f"Не удалось отправить сводку админу: {e}")
-    
     text, html = None, False
     is_joke = False
     
     if kind == "greeting":
         text = greeting_text(n)
-    elif kind == "nudge_morning":
-        base = missing_text("morning", n, "☕ Утренний отчёт")
-        if not base:
+        
+    elif kind in ("nudge_morning", "nudge_midday"):
+        window = "morning" if kind == "nudge_morning" else "midday"
+        today = biz_date(n).isoformat()
+        reported = set(day_entries(today, window))
+        
+        # Квота 16 отчетов
+        if len(reported) >= 16:
+            all_reports = day_entries(today, window)
+            unidentified = [s for s in all_reports if s not in STORE_NAMES]
+            msg = (f"📊 <b>Сводка (окно {window})</b>\n"
+                   f"Собрано отчетов: {len(all_reports)}/16\n"
+                   f"Статус: ✅ Квота 16 отчетов закрыта, пуш отменен\n"
+                   f"Не идентифицированы ({len(unidentified)} шт): {', '.join(unidentified)}")
+            try:
+                await bot.send_message(ADMIN_ID, msg, parse_mode="HTML")
+            except Exception:
+                pass
             return "skip"
-        text = f"{base} Коллеги, не забываем 🙏"
-    elif kind == "nudge_midday":
-        base = missing_text("midday", n, "⏳ Обеденный отчёт")
-        if not base:
+
+        expected = expected_stores(window, today)
+        miss = sorted(expected - reported)
+        
+        if not miss:
             return "skip"
-        text = f"{base} Коллеги, не забываем 🙏"
+            
+        pm_push = STATE.get("pm_push_enabled", True)
+        
+        # Отправка сводки Создателю
+        all_reports = day_entries(today, window)
+        unidentified = [s for s in all_reports if s not in STORE_NAMES]
+        msg = (f"📊 <b>Сводка (окно {window})</b>\n"
+               f"Собрано отчетов: {len(all_reports)}/16\n"
+               f"Статус: ⚠️ Отправлен пуш ({'в ЛС' if pm_push else 'в группу'})\n"
+               f"Не идентифицированы ({len(unidentified)} шт): {', '.join(unidentified)}")
+        try:
+            await bot.send_message(ADMIN_ID, msg, parse_mode="HTML")
+        except Exception:
+            pass
+
+        label = "утренний отчёт" if window == "morning" else "обеденный отчёт"
+        
+        if pm_push:
+            for m in miss:
+                target_id = USER_ID_BY_STORE.get(m)
+                if target_id:
+                    try:
+                        await bot.send_message(target_id, f"⏳ Напоминаю: время сдавать {label}. Жду цифры в общем чате!")
+                        STATE.setdefault("pending_report_push", {})[target_id] = time.time()
+                    except Exception:
+                        pass
+            save_state()
+            return "sent"
+        else:
+            label_cap = "☕ Утренний отчёт" if window == "morning" else "⏳ Обеденный отчёт"
+            shown = ", ".join(miss[:8])
+            more = f" и ещё {len(miss) - 8}" if len(miss) > 8 else ""
+            text = f"{label_cap} ещё ждём от: {shown}{more}. Коллеги, не забываем 🙏"
         
     if text is None and (kind == "joke" or fallback):
         if jokes_temporarily_paused():
