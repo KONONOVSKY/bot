@@ -3,6 +3,7 @@
 TOP TEAM - рабочий бот для чата 16 магазинов (Сота Альянс, Одесский регион).
 Обновленная версия: жесткая защита ЛС (только Создатель), категорийное меню ЛС,
 режимы работы (Нормальный, Без шуток (тумблер), Полный стоп) и принудительная отправка шуток в общий чат.
+Включает расширенную дневную и недельную статистику с публикацией в чат.
 """
 from __future__ import annotations
 
@@ -137,7 +138,8 @@ STATE: dict = {
     "chat_id": None, "history": {}, "bags": {}, "done": {},
     "jokes_used": [], "queued_joke": None, "review_pending": {},
     "tech_reply_date": "", "fans": {},
-    "jokes_disabled": False, "full_stop": False
+    "jokes_disabled": False, "full_stop": False,
+    "queued_stats": None
 }
 
 class RT:
@@ -1064,7 +1066,7 @@ def report_reactions(window: str, pct, closed: bool) -> list:
     if pct >= 60:
         return ["🤝"]
         
-    return ["😔", "😢"]
+    return ["😔", "😔"]
 
 def maybe_reset_day_counters(n: datetime) -> None:
     d = n.date().isoformat()
@@ -1259,7 +1261,7 @@ SLOTS = [
 KIND_NAMES = {
     "greeting": "Утреннее приветствие",
     "nudge_morning": "Напоминание (Утро)",
-    "joke": "Плановая шутка",
+    "joke": "Плаடியே шутка",
     "nudge_midday": "Напоминание (Обед)",
 }
 
@@ -1750,16 +1752,123 @@ async def on_callback_query(callback: CallbackQuery) -> None:
             return
 
         if data == "admin:stats":
-            bd = biz_date(n).isoformat()
-            ent_m = day_entries(bd, "morning")
-            ent_d = day_entries(bd, "midday")
-            ent_e = day_entries(bd, "evening")
-            text = (f"📊 <b>Статистика за сегодня ({bd}):</b>\n"
-                    f"🌅 Утро: {len(ent_m)}\n☀️ Обед: {len(ent_d)}\n🌙 Вечер: {len(ent_e)}")
-            await callback.message.reply(text, parse_mode="HTML")
+            today = biz_date(n)
+            start_date = today - timedelta(days=today.weekday())
+            week_dates = [(start_date + timedelta(days=i)).isoformat() for i in range((today - start_date).days + 1)]
+            today_str = today.isoformat()
+
+            today_data = STATE["history"].get(today_str, {})
+            today_valid = {}
+            today_missed = []
+            for s in STORE_NAMES:
+                store_day = today_data.get(s, {})
+                best_rep = store_day.get("evening") or store_day.get("midday") or store_day.get("morning")
+                if best_rep and best_rep.get("fact") is not None and best_rep.get("pct") is not None:
+                    today_valid[s] = best_rep
+                else:
+                    today_missed.append(s)
+            
+            top_today_fact = sorted(today_valid.items(), key=lambda x: -x[1]["fact"])[:3]
+            top_today_pct = sorted(today_valid.items(), key=lambda x: -x[1]["pct"])[:3]
+            
+            weekly_stats = {s: {"fact": 0, "plan": 0, "missed": 0} for s in STORE_NAMES}
+            for d in week_dates:
+                day_data = STATE["history"].get(d, {})
+                for s in STORE_NAMES:
+                    store_day = day_data.get(s, {})
+                    best_rep = store_day.get("evening") or store_day.get("midday") or store_day.get("morning")
+                    if best_rep and best_rep.get("fact") is not None:
+                        weekly_stats[s]["fact"] += best_rep["fact"]
+                        if best_rep.get("plan"):
+                            weekly_stats[s]["plan"] += best_rep["plan"]
+                    else:
+                        weekly_stats[s]["missed"] += 1
+            
+            for s in STORE_NAMES:
+                if weekly_stats[s]["plan"] > 0:
+                    weekly_stats[s]["pct"] = (weekly_stats[s]["fact"] / weekly_stats[s]["plan"]) * 100
+                else:
+                    weekly_stats[s]["pct"] = 0
+
+            top_week_fact = sorted([item for item in weekly_stats.items() if item[1]["fact"] > 0], key=lambda x: -x[1]["fact"])[:3]
+            top_week_pct = sorted([item for item in weekly_stats.items() if item[1]["pct"] > 0], key=lambda x: -x[1]["pct"])[:3]
+            week_missed = [f"{s} ({st['missed']} шт.)" for s, st in weekly_stats.items() if st["missed"] > 0]
+
+            medals = ["🥇", "🥈", "🥉"]
+            lines = [f"📊 <b>Статистика за сегодня ({today.strftime('%d.%m')}):</b>", "<b>По сумме:</b>"]
+            for i, (s, rep) in enumerate(top_today_fact):
+                lines.append(f"{medals[i]} {escape(s)} - {rep['fact']} грн ({pct_str(rep['pct'])})")
+            
+            if not top_today_fact:
+                lines.append("<i>Нет данных</i>")
+                
+            lines.append("<b>По выполнению:</b>")
+            for i, (s, rep) in enumerate(top_today_pct):
+                lines.append(f"{medals[i]} {escape(s)} - {pct_str(rep['pct'])}")
+                
+            if not top_today_pct:
+                lines.append("<i>Нет данных</i>")
+                
+            if today_missed:
+                lines.append(f"⚠️ <i>Нет отчетов сегодня:</i> {escape(', '.join(today_missed))}")
+            else:
+                lines.append("✅ <i>Все сдали отчеты сегодня!</i>")
+
+            lines.extend(["", f"🏆 <b>Текущая неделя (с {start_date.strftime('%d.%m')} по {today.strftime('%d.%m')}):</b>", "<b>По сумме:</b>"])
+            for i, (s, rep) in enumerate(top_week_fact):
+                lines.append(f"{medals[i]} {escape(s)} - {rep['fact']} грн ({pct_str(rep['pct'])})")
+                
+            if not top_week_fact:
+                lines.append("<i>Нет данных</i>")
+                
+            lines.append("<b>По выполнению:</b>")
+            for i, (s, rep) in enumerate(top_week_pct):
+                lines.append(f"{medals[i]} {escape(s)} - {pct_str(rep['pct'])}")
+                
+            if not top_week_pct:
+                lines.append("<i>Нет данных</i>")
+                
+            if week_missed:
+                lines.append(f"❌ <i>Пропуски за неделю:</i> {escape(', '.join(week_missed))}")
+
+            report_text = "\n".join(lines)
+            STATE["queued_stats"] = report_text
+            save_state()
+
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="📢 Опубликовать в общий чат", callback_data="pub:stats_complex")],
+                [InlineKeyboardButton(text="🔙 Назад", callback_data="menu:reports")]
+            ])
+            
+            await callback.message.edit_text(report_text, parse_mode="HTML", reply_markup=kb)
             await callback.answer()
             return
             
+        if data == "pub:stats_complex":
+            if is_after_hard_mute() or not can_speak(n, gap=False, ignore_mute=True):
+                await callback.answer("❌ Публикация заблокирована (режим тишины).", show_alert=True)
+                return
+            
+            text_to_send = STATE.get("queued_stats")
+            if not text_to_send:
+                await callback.answer("❌ Нет сохраненного отчета.", show_alert=True)
+                return
+                
+            cid = get_chat_id()
+            if not cid:
+                await callback.answer("❌ Не задан ID чата.", show_alert=True)
+                return
+                
+            sent = await send_chat_message(cid, text_to_send, parse_mode="HTML")
+            if sent:
+                await callback.answer("✅ Улетело в чат!")
+                await callback.message.edit_reply_markup(reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="🔙 Назад", callback_data="menu:reports")]
+                ]))
+            else:
+                await callback.answer("❌ Ошибка отправки в чат.", show_alert=True)
+            return
+
         if data == "admin:missing":
             bd = biz_date(n).isoformat()
             lines = [f"📋 <b>Не сдали отчёты за {bd}:</b>"]
