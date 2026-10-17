@@ -111,7 +111,7 @@ def now() -> datetime:
     return dt
 
 def biz_date(dt: datetime) -> date:
-    return (dt - timedelta(hours=3)).date()
+    return dt.date()
 
 def in_speak_hours(n: datetime) -> bool:
     cur = (n.hour, n.minute)
