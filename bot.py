@@ -2,7 +2,7 @@
 """
 TOP TEAM - рабочий бот для чата 16 магазинов (Сота Альянс, Одесский регион).
 Обновленная версия: жесткая защита ЛС (только Создатель), категорийное меню ЛС,
-режимы работы (Нормальный, Без шуток 24ч, Полный стоп) и принудительная отправка шуток в общий чат.
+режимы работы (Нормальный, Без шуток (тумблер), Полный стоп) и принудительная отправка шуток в общий чат.
 """
 from __future__ import annotations
 
@@ -137,7 +137,7 @@ STATE: dict = {
     "chat_id": None, "history": {}, "bags": {}, "done": {},
     "jokes_used": [], "queued_joke": None, "review_pending": {},
     "tech_reply_date": "", "fans": {},
-    "jokes_disabled_until": 0.0, "full_stop": False
+    "jokes_disabled": False, "full_stop": False
 }
 
 class RT:
@@ -157,6 +157,8 @@ class RT:
     bot_username = ""
     bot_name_norm = ""
     pm_last_reply: dict = {}
+    group_mentions: list = []           # история времени тегов бота
+    ignore_mentions_until: float = 0.0  # таймер 10-минутного игнора
 
 def load_state() -> None:
     try:
@@ -590,21 +592,21 @@ ZOOMER_PHRASES = [
 
 SITUATIONS = {
     "morning": [
-        "☀️ Доброе утро, ОФ2!",
-        "☕ Кофе выпили? Всем жирных чеков! 💸",
-        "⚡ Утро начинается не с кофе, а с проверки цифр на день. Удачной смены, команда!",
-        "🎯 Доброе утро! Пусть сегодня каждый клиент берет страховку.",
-        "🚀 Всем утро! Желаю, чтобы таргет одобрял кредиты быстрее, чем зависает 1С.",
-        "☀️ ОФ2, на связи! Пусть сегодняшний день пройдет без возвратов и токсиков.",
-        "🔋 Заряжаемся на позитив, всем доброе утро!",
-        "🛒 Утро в ОФ2! Пусть конкуренты плачут, а планы закрываются.",
-        "✨ Отличного дня! Пусть каждый зашедший «просто посмотреть» уходит с застрахованным.",
-        "🔥 Доброе утро! Ни шагу назад без допов!",
-        "🛡️ Всем бодрого утра! Сегодня продаем даже тем, кто зашел просто спросить дорогу к маку.",
-        "☀️ Просыпаемся, ОФ2! Желаю смены, где все 16 магазинов выполнили план.",
-        "💳 Утро в нашем чате! Всем легких продаж и лояльных клиентов!",
-        "🏆 Начинаем смену! Пусть КРО смотрит в другую сторону, а чеки бьются без ошибок.",
-        "☕ Доброе утро! ОФ2"
+        "☀️ Доброе утро! Всем отличного настроения и продуктивного дня!",
+        "☕ Бодрого утра, команда! Желаю легкой смены и высоких продаж! 💸",
+        "🚀 Всем привет! Успешного дня и побольше довольных клиентов!",
+        "✨ Доброе утро! Пусть сегодняшний день принесет отличные результаты!",
+        "🎯 Отличного старта дня! Всем выполнения планов и крутых чеков!",
+        "☀️ Доброе утро! Желаю энергии на весь день и классных продаж! 🛒",
+        "💼 Всем доброго утра и позитивной смены!",
+        "☕ Приветствуем! Пусть день пройдет легко и результативно! 📈",
+        "🌟 Доброе утро, команда! Желаю отличных продаж и лояльных покупателей!",
+        "⚡ Бодрого начала дня! Всем удачи и стабильно высоких чеков! 💳",
+        "☀️ Доброе утро! Желаю спокойной и продуктивной смены! 🤝",
+        "🎯 Всем привет! Пусть планы закрываются легко и с удовольствием!",
+        "🚀 Доброе утро! Настраиваемся на позитив и мощные продажи!",
+        "✨ Успешной смены, коллеги! Пусть день будет богат на хорошие чеки! 💰",
+        "☕ Доброе утро! Всем отличных результатов и благодарных клиентов!"
     ],
     "bot_mention_manager": [
         "Упс, кажется, мои нейроны перегрелись. Ушел к IT-отделу на диагностику, скоро вернусь! 🔧",
@@ -624,36 +626,36 @@ SITUATIONS = {
         "Пинг слишком высокий. Ухожу в спящий режим, пока IT всё не починят! 💤"
     ],
     "bot_mention_store": [
-        "Магазин на связи! К сожалению, пока не могу поболтать - анализирую ваши шикарные продажи. 📈",
-        "Вижу вас! Но моя система настроена только на приём отчётов и чеков. Удачной смены! 💼",
-        "Привет! Рад бы ответить развернуто, но я тут чисто для фиксации ваших рекордов. Вперёд за чеками! 🚀",
-        "Магазин, вы супер! Но мне пока нельзя отвлекаться от подсчета кассы. Жду цифр! 💰",
-        "Я на связи, но в режиме «только чтение отчётов». Делайте кассу, а я всё зафиксирую! 📝",
-        "Слышу вас, магазин! Моя поддержка всегда с вами, даже если я молчу. Удачи с клиентами! 🤝",
-        "Принял! Но текстовый модуль занят подсчётом выполнения вашего плана. Не отвлекаемся! 🎯",
-        "Команда, я с вами! Просто ушел с головой в ваши вечерние цифры. Хороших продаж! ✨",
-        "Всегда рад сообщению от вас! Но давайте лучше обсудим вашу следующую продажу в кредит. 💳",
-        "Мой алгоритм любит этот магазин, но общаться пока не разрешает. Делайте план! 🏆",
+        "Принял! Но текстовый модуль занят подсчётом чеков. Не отвлекаемся на чат, клиенты ждут! 🎯",
+        "Я always на связи. Но лучше бы ты так активно предлагал страховки! 🛡️",
+        "Слышу вас! Рад бы поболтать, но Анатольевич просил следить за конверсией. Идем работать! 💼",
+        "Контакт есть! А теперь идем конвертировать этот контакт в продажу! 🤝",
+        "Вижу твое сообщение, а вот нового чека в 1С пока не вижу. Исправляем? 👀",
+        "Бот на месте, всё фиксирует. Желаю побольше клиентов с хорошим настроением и одобренных рассрочек! ☀️",
+        "Вайб-чек пройден, а план по допам? Идем продавать! 🚀",
+        "Я literally машина для сбора отчетов, а не ChatGPT. Жду крутых цифр! 📊",
+        "Связь установлена. Но давай лучше установим защиту на экран клиенту! 📱",
+        "Мой код не позволяет мне долго болтать. КРО не спит, клиенты ждут! 👀",
+        "Я тут чисто purely for vibes и фиксации ваших побед. Погнали делать кассу! 💸",
         "Отметил вас в системе как самых активных! А теперь возвращаемся к продажам. 🛒",
-        "Я тут, всё вижу и всё ценю. Желаю побольше клиентов с хорошим настроением! ☀️",
-        "Ваш запрос принят! Обрабатываю его с той же скоростью, с которой вы продаете допы. ⚡",
-        "Всегда на страже ваших успехов. Работаем дальше, жду крутых чеков! 🧾",
-        "Привет! Настроение - хвалить вас за страховки. Идите и продайте парочку! 🛡️",
-        "Вы - топ! Но я всего лишь бот, моё дело - радоваться вашим цифрам. 🥳",
-        "Магазин принял. Бот подтвердил. Идем работать дальше! 🫡",
-        "Спасибо за сообщение! Но клиенты в зале важнее. Переключаемся на них! 👀",
+        "Окей, летс гоу! Но только после того, как закроете кредитную заявку. 💳",
+        "Я бы ответил развернуто, но мне за это не платят. А вам за продажи — да. Вперед! 🏃‍♂️",
+        "Тегаете бота? Лучше тегните клиента на покупку аксессуаров! 🎧",
+        "Сорри, я сейчас на детоксе от общения. Жду только вечерний отчет! 🧘",
+        "Поговорим, когда скинешь чек с флагманом и рассрочкой. Я жду. ⏳",
+        "Я тут, чтобы радоваться вашим цифрам. Давайте сделаем их больше! 📈",
+        "Всегда рад сообщению от вас! Но давайте лучше обсудим вашу следующую продажу. 💬",
         "Мои шестеренки крутятся ради вашего товарооборота. Рад быть полезным! ⚙️",
+        "Привет-привет! Моя база данных готова к вашим вечерним отчетам. Не подведите! 📝",
+        "Магазин принял. Бот подтвердил. Идем работать дальше! 🫡",
+        "Спасибо за внимание! Но клиенты в зале важнее. Переключаемся на них! 👥",
+        "Мой алгоритм подсказывает, что кому-то пора проверить остатки на витрине. 📦",
+        "Я тут simply watching. Делайте красиво, а я всё запишу! ✨",
         "Обнимаю виртуально! И жду реальных рекордов в 1С. 🤗",
         "Как всегда на высоте! Но болтать некогда, план сам себя не сделает. 💪",
-        "Вызывали бота? Я здесь, слежу за вашими успехами и радуюсь каждому флагману! 📱",
-        "Связь установлена. Но лучше установите защиту на экран клиенту! 🔐",
-        "Рад вниманию, но главное внимание - покупателям. Всем успешной смены! 🫶",
-        "Магазин, вы крутые. Оставляю вас наедине с выполнением плана! 🌈",
-        "Ваш бот-помощник на связи. Фиксирую вашу активность и жду жирных чеков! 💸",
-        "Привет-привет! Моя база данных готова к вашим вечерним отчетам. Не подведите! 📊",
+        "Ваш бот-помощник на связи. Фиксирую вашу активность и жду жирных чеков! 🧾",
         "Я always тут, на фоне. Работайте спокойно, я всё посчитаю. 🧮",
-        "Спасибо, что помните про бота! Возвращаю вам лучи поддержки и лояльных клиентов. ✨",
-        "Контакт есть! А теперь идем конвертировать этот контакт в продажу! 🤝"
+        "Коннект успешен. Отключаюсь ради ваших высоких продаж! 🔌"
     ],
     "bot_mention_employee": [
         "Я бы ответил, но мы же оба знаем, что тебе лучше пойти клиенту страховку продать. 👀",
@@ -1210,7 +1212,7 @@ async def handle_command(message: Message, cmd: str) -> None:
     if cmd == "/help" or cmd == "/start":
         await say(HELP_TEXT, message)
     elif cmd == "/joke":
-        if STATE.get("jokes_disabled_until", 0.0) > time.time():
+        if STATE.get("jokes_disabled", False):
             await react(message, ["🤫"])
             return
         if time.time() - RT.last_bot > 120 and not jokes_temporarily_paused():
@@ -1245,7 +1247,7 @@ async def handle_command(message: Message, cmd: str) -> None:
 
 # ============================ РАСПИСАНИЕ И ЛЕГЕНДА СЛОТОВ ============================
 SLOTS = [
-    ("greet", 8, 0, "greeting", False),
+    ("greet", 8, 30, "greeting", False),
     ("nudge_m", 8, 55, "nudge_morning", False),
     ("j11", 11, 0, "joke", False),
     ("j12", 12, 0, "joke", False),
@@ -1410,7 +1412,7 @@ def force_resume(n: datetime) -> None:
         if n.replace(hour=h, minute=minute, second=0, microsecond=0) <= n:
             mark_slot_done(done, slot_id)
     STATE["full_stop"] = False
-    STATE["jokes_disabled_until"] = 0.0
+    STATE["jokes_disabled"] = False
     save_state()
     RT.is_suspended = False
     RT.awaiting_history = False
@@ -1425,11 +1427,11 @@ def admin_main_keyboard() -> InlineKeyboardMarkup:
     ])
 
 def admin_modes_keyboard() -> InlineKeyboardMarkup:
-    jokes_dis = STATE.get("jokes_disabled_until", 0.0) > time.time()
+    jokes_dis = STATE.get("jokes_disabled", False)
     full_stop = STATE.get("full_stop", False) or RT.is_suspended
     
     lbl_norm = "🟢 Нормальный режим" + (" (активен)" if not jokes_dis and not full_stop else "")
-    lbl_nojokes = "🤫 Без шуток (24ч)" + (" (активен)" if jokes_dis and not full_stop else "")
+    lbl_nojokes = "🤫 Без шуток (Постоянно)" + (" (активен)" if jokes_dis and not full_stop else "")
     lbl_stop = "🔴 Полный стоп" + (" (активен)" if full_stop else "")
     
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -1459,13 +1461,12 @@ def admin_reports_keyboard() -> InlineKeyboardMarkup:
 def admin_panel_text(note: str | None = None) -> str:
     planned = queued_joke_for(now())
     full_stop = STATE.get("full_stop", False) or RT.is_suspended
-    jokes_disabled = STATE.get("jokes_disabled_until", 0.0) > time.time()
+    jokes_disabled = STATE.get("jokes_disabled", False)
     
     if full_stop:
         status = "🔴 ПОЛНЫЙ СТОП (Все функции выключены)"
     elif jokes_disabled:
-        until_dt = datetime.fromtimestamp(STATE["jokes_disabled_until"], TZ).strftime("%H:%M (%d.%m)")
-        status = f"🤫 БЕЗ ШУТОК (До {until_dt}). Отчёты и напоминания работают"
+        status = "🤫 БЕЗ ШУТОК (Постоянно). Отчёты и напоминания работают"
     else:
         status = "🟢 НОРМАЛЬНЫЙ (Всё работает по расписанию)"
         
@@ -1611,7 +1612,7 @@ async def on_callback_query(callback: CallbackQuery) -> None:
         # Переключение режимов работы
         if data == "mode:normal":
             STATE["full_stop"] = False
-            STATE["jokes_disabled_until"] = 0.0
+            STATE["jokes_disabled"] = False
             RT.is_suspended = False
             save_state()
             await callback.message.edit_text(admin_panel_text("Переключено на Нормальный режим!"), parse_mode="HTML", reply_markup=admin_modes_keyboard())
@@ -1620,11 +1621,16 @@ async def on_callback_query(callback: CallbackQuery) -> None:
             
         if data == "mode:no_jokes":
             STATE["full_stop"] = False
-            STATE["jokes_disabled_until"] = time.time() + 86400.0
+            STATE["jokes_disabled"] = not STATE.get("jokes_disabled", False)
             RT.is_suspended = False
             save_state()
-            await callback.message.edit_text(admin_panel_text("Режим 'Без шуток' включен на 24 часа!"), parse_mode="HTML", reply_markup=admin_modes_keyboard())
-            await callback.answer("Без шуток на 24ч")
+            
+            state_msg = "ВКЛЮЧЕН (постоянно)" if STATE["jokes_disabled"] else "ВЫКЛЮЧЕН"
+            await callback.message.edit_text(
+                admin_panel_text(f"Режим 'Без шуток' {state_msg}!"), 
+                parse_mode="HTML", reply_markup=admin_modes_keyboard()
+            )
+            await callback.answer(f"Без шуток: {state_msg}")
             return
             
         if data == "mode:full_stop":
@@ -1638,7 +1644,7 @@ async def on_callback_query(callback: CallbackQuery) -> None:
         # Обработка загрузки истории
         if data == "hist:start":
             STATE["full_stop"] = False
-            STATE["jokes_disabled_until"] = 0.0
+            STATE["jokes_disabled"] = False
             force_resume(n)
             await callback.message.edit_reply_markup(reply_markup=None)
             await callback.message.reply("🚀 <b>Бот запущен в работу по графику.</b>", parse_mode="HTML", reply_markup=admin_main_keyboard())
@@ -1928,12 +1934,25 @@ async def process(message: Message, edited: bool) -> None:
 
     if directed_to_bot and len(text) < 200:
         if can_speak(n, gap=False) and not RT.is_suspended:
-            is_store = (user.id in STORE_BY_USER_ID)
-            if is_store:
-                reply_text = pick_bag("bot_mention_store", SITUATIONS["bot_mention_store"])
+            now_ts = time.time()
+            
+            # Если бот в 10-минутном игноре
+            if now_ts < getattr(RT, "ignore_mentions_until", 0.0):
+                await react(message, ["🤫", "⏳", "👀"])
+                return
+
+            # Очищаем старые теги (оставляем только за последние 10 минут)
+            RT.group_mentions = [ts for ts in getattr(RT, "group_mentions", []) if now_ts - ts < 600]
+            RT.group_mentions.append(now_ts)
+
+            if len(RT.group_mentions) >= 3:
+                # На 3-й раз выдаем фразу для менеджера и уходим в игнор на 10 минут
+                await say(pick_bag("bot_mention_manager", SITUATIONS["bot_mention_manager"]), message, track_deletable=True)
+                RT.ignore_mentions_until = now_ts + 600
+                RT.group_mentions.clear()
             else:
-                reply_text = pick_bag("bot_mention_employee", SITUATIONS["bot_mention_employee"])
-            await say(reply_text, message, track_deletable=True)
+                # 1-й и 2-й раз отвечаем универсально
+                await say(pick_bag("bot_mention_store", SITUATIONS["bot_mention_store"]), message, track_deletable=True)
         elif not RT.is_suspended:
             await react(message, ["🤡", "💅", "🗿", "🥱", "👀"])
         return
@@ -1985,7 +2004,7 @@ async def run_slot(kind: str, fallback: bool, n: datetime) -> str:
     jokes_kind = kind == "joke" or fallback
     critical_reminder = kind in ("nudge_morning", "nudge_midday")
 
-    if jokes_kind and STATE.get("jokes_disabled_until", 0.0) > time.time():
+    if jokes_kind and STATE.get("jokes_disabled", False):
         return "skip"
 
     if not can_speak(n, jokes=False, ignore_mute=critical_reminder):
