@@ -161,7 +161,9 @@ class RT:
     bot_name_norm = ""
     pm_last_reply: dict = {}
     group_mentions: list = []           
-    ignore_mentions_until: float = 0.0  
+    ignore_mentions_until: float = 0.0
+    startup_ts: float = 0.0      # время запуска бота (wall clock)
+    resumed_ts: float = 0.0     # время снятия паузы (hist:start / mode:normal)
 
 def load_state() -> None:
     try:
@@ -189,6 +191,10 @@ def migrate_state() -> None:
 
 def save_state() -> None:
     try:
+        # Обрезаем историю раз при каждом сохранении (не в record_report при каждом отчёте)
+        hist = STATE.get("history", {})
+        for old_day in sorted(hist)[:-40]:
+            hist.pop(old_day, None)
         tmp = STATE_FILE + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(STATE, f, ensure_ascii=False)
@@ -444,8 +450,6 @@ def record_report(store: str, window: str, dt: datetime, rep: dict) -> bool:
         "plan": rep["plan"], "fact": rep["fact"], "closed": rep["closed"],
         "pct": rep["pct"], "t": dt.strftime("%H:%M"),
     }
-    for old_day in sorted(STATE["history"])[:-40]:
-        STATE["history"].pop(old_day, None)
     return True
 
 def day_entries(bd: str, window: str) -> dict:
@@ -1431,6 +1435,7 @@ def force_resume(n: datetime) -> None:
     save_state()
     RT.is_suspended = False
     RT.awaiting_history = False
+    RT.resumed_ts = time.time()
 
 # ============================ КЛАВИАТУРЫ И МЕНЮ ЛС ============================
 def admin_main_keyboard() -> InlineKeyboardMarkup:
@@ -1545,6 +1550,10 @@ async def handle_document(message: Message):
                     "Отчёты за сегодня из этого файла восстановить нельзя. Нужен свежий экспорт чата."
                 ]
             
+            lines += [
+                "",
+                "⏳ <i>После нажатия «Запустить» бот подождёт 2 мин, чтобы дообработать все сообщения из очереди, и только потом проверит должников.</i>",
+            ]
             if res["last_mgr"]:
                 mdt, mname = res["last_mgr"]
                 until = datetime.fromtimestamp(RT.jokes_paused_until, TZ)
@@ -1679,6 +1688,7 @@ async def on_callback_query(callback: CallbackQuery) -> None:
             STATE["full_stop"] = False
             STATE["jokes_disabled"] = False
             RT.is_suspended = False
+            RT.resumed_ts = time.time()
             save_state()
             await callback.message.edit_text(admin_panel_text("Переключено на Нормальный режим!"), parse_mode="HTML", reply_markup=admin_modes_keyboard())
             await callback.answer("Нормальный режим")
@@ -1688,6 +1698,7 @@ async def on_callback_query(callback: CallbackQuery) -> None:
             STATE["full_stop"] = False
             STATE["jokes_disabled"] = not STATE.get("jokes_disabled", False)
             RT.is_suspended = False
+            RT.resumed_ts = time.time()
             save_state()
             
             state_msg = "ВКЛЮЧЕН (постоянно)" if STATE["jokes_disabled"] else "ВЫКЛЮЧЕН"
@@ -1811,11 +1822,11 @@ async def on_callback_query(callback: CallbackQuery) -> None:
             return
             
         if data.startswith("push:"):
-            store_name = data.split(":", 1)[1]
+            push_store = data.split(":", 1)[1]
             pm_push = STATE.get("pm_push_enabled", True)
             
             if pm_push:
-                target_id = USER_ID_BY_STORE.get(store_name)
+                target_id = USER_ID_BY_STORE.get(push_store)
                 if not target_id:
                     await callback.answer("❌ ID магазина не найден в базе.", show_alert=True)
                     return
@@ -1825,7 +1836,7 @@ async def on_callback_query(callback: CallbackQuery) -> None:
                     STATE.setdefault("pending_report_push", {})[target_id] = time.time()
                     save_state()
                     
-                    await callback.message.edit_text(f"✅ Пуш отправлен в ЛС магазину {escape(store_name)}!", parse_mode="HTML", reply_markup=admin_reports_keyboard())
+                    await callback.message.edit_text(f"✅ Пуш отправлен в ЛС магазину {escape(push_store)}!", parse_mode="HTML", reply_markup=admin_reports_keyboard())
                     await callback.answer("Отправлено в ЛС")
                 except Exception as e:
                     await callback.answer("❌ Ошибка! Бот заблокирован магазином в ЛС.", show_alert=True)
@@ -1834,8 +1845,8 @@ async def on_callback_query(callback: CallbackQuery) -> None:
                 if not cid:
                     await callback.answer("ID чата не настроен.", show_alert=True)
                     return
-                await send_chat_message(cid, f"{store_name}, я всё вижу! Где отчёт? 👀")
-                await callback.message.edit_text(f"✅ Пуш отправлен в общий чат магазину {escape(store_name)}!", parse_mode="HTML", reply_markup=admin_reports_keyboard())
+                await send_chat_message(cid, f"{push_store}, я всё вижу! Где отчёт? 👀")
+                await callback.message.edit_text(f"✅ Пуш отправлен в общий чат магазину {escape(push_store)}!", parse_mode="HTML", reply_markup=admin_reports_keyboard())
                 await callback.answer("Отправлено в общий чат")
             return
 
@@ -1960,6 +1971,10 @@ async def on_callback_query(callback: CallbackQuery) -> None:
         if data == "admin:missing":
             bd = biz_date(n).isoformat()
             lines = [f"📋 <b>Не сдали отчёты за {bd}:</b>"]
+            if RT.resumed_ts and time.time() - RT.resumed_ts < 120:
+                secs = int(time.time() - RT.resumed_ts)
+                lines.append(f"⚠️ <i>Бот активирован {secs} сек назад — данные могут быть неполными (pending updates). Повторите через {120 - secs} сек.</i>")
+                lines.append("")
             for win, title in (("morning", "Утро"), ("midday", "Обед"), ("evening", "Вечер")):
                 reported = set(day_entries(bd, win))
                 if len(reported) >= 16:
@@ -2209,6 +2224,12 @@ async def run_slot(kind: str, fallback: bool, n: datetime) -> str:
         text = greeting_text(n)
         
     elif kind in ("nudge_morning", "nudge_midday"):
+        # Grace period: если бот только что активировался (менее 2 мин назад),
+        # pending updates с отчётами ещё могут обрабатываться — не шлём ложных пушей.
+        if RT.resumed_ts and time.time() - RT.resumed_ts < 120:
+            log.info("nudge_%s пропускаем: %d сек после активации (grace period 120 сек)",
+                     kind, int(time.time() - RT.resumed_ts))
+            return "retry"
         window = "morning" if kind == "nudge_morning" else "midday"
         today = biz_date(n).isoformat()
         reported = set(day_entries(today, window))
@@ -2315,12 +2336,20 @@ async def tick() -> None:
         if status in ("sent", "skip"):
             mark_slot_done(done, slot_id)
             save_state()
-            break  
+            break
+        # retry: для nudge-слотов выходим (ждём следующего тика),
+        # для шуток продолжаем перебор слотов.
         if status == "retry":
+            if kind in ("nudge_morning", "nudge_midday"):
+                break
             continue
         break
 
 async def scheduler_loop() -> None:
+    # Ждём обработки pending updates после рестарта: Telegram доставляет их пачкой,
+    # отчёты записываются в state — только потом планировщик проверяет должников.
+    await asyncio.sleep(90)
+    log.info("Планировщик активирован (90 сек после старта)")
     while True:
         try:
             if not STATE.get("full_stop", False) and not RT.is_suspended and not is_after_hard_mute():
@@ -2343,6 +2372,7 @@ async def start_keepalive_server() -> None:
 
 async def main() -> None:
     load_state()
+    RT.startup_ts = time.time()
     RT.last_human = time.time()
     await bot.delete_webhook(drop_pending_updates=False)
     await start_keepalive_server()
