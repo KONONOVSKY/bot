@@ -42,6 +42,10 @@ if not BOT_TOKEN:
 ENV_CHAT_ID = os.environ.get("CHAT_ID", "").strip()      
 TEST_MODE = os.environ.get("TEST_MODE", "").strip().lower() in ("1", "true", "yes")  
 STATE_FILE = os.environ.get("STATE_FILE", "state.json")
+# Если True — при каждом save_state отправляем state.json себе в ЛС как файл-бэкап,
+# а при старте без локального файла пытаемся восстановить его оттуда.
+# Решает проблему ephemeral filesystem на Render.
+TG_STATE_BACKUP = os.environ.get("TG_STATE_BACKUP", "1").strip().lower() not in ("0", "false", "no")
 
 try:
     TZ = ZoneInfo("Europe/Kyiv")
@@ -165,23 +169,82 @@ class RT:
     startup_ts: float = 0.0      # время запуска бота (wall clock)
     resumed_ts: float = 0.0     # время снятия паузы (hist:start / mode:normal)
 
+def _apply_state_data(data: dict) -> None:
+    """Применяет загруженный словарь к STATE."""
+    if not isinstance(data, dict):
+        raise ValueError("корень state.json должен быть объектом")
+    if not isinstance(data.get("history", {}), dict) or not isinstance(data.get("done", {}), dict):
+        raise ValueError("некорректная структура history/done")
+    STATE.update({k: data.get(k, STATE[k]) for k in STATE})
+    migrate_state()
+    log.info("Состояние применено: дней истории=%d", len(STATE.get("history", {})))
+
 def load_state() -> None:
     try:
         with open(STATE_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
-        if not isinstance(data, dict):
-            raise ValueError("корень state.json должен быть объектом")
-        # Не принимаем повреждённые/неполные структуры, которые позже ломают статистику.
-        if not isinstance(data.get("history", {}), dict) or not isinstance(data.get("done", {}), dict):
-            raise ValueError("некорректная структура history/done")
-        STATE.update({k: data.get(k, STATE[k]) for k in STATE})
-        migrate_state()
-        log.info("Состояние загружено: дней истории=%d", len(STATE.get("history", {})))
+        _apply_state_data(data)
     except FileNotFoundError:
-        log.warning("Файл состояния %s не найден; запускаюсь с пустым состоянием", STATE_FILE)
+        log.warning("Файл состояния %s не найден; попробую восстановить из Telegram при старте", STATE_FILE)
     except Exception as e:
-        # Сохраняем исходный файл для диагностики; не затираем его автоматически.
         log.exception("Не удалось прочитать состояние %s: %s", STATE_FILE, e)
+
+async def restore_state_from_telegram() -> bool:
+    """Ищет последний state.json-бэкап в ЛС бота с собой и восстанавливает его.
+    Вызывается при старте если локальный файл не найден или пуст."""
+    if not TG_STATE_BACKUP:
+        return False
+    # Проверяем нужно ли восстанавливать (история пустая = файла не было)
+    if STATE.get("history"):
+        return False
+    try:
+        log.info("Пытаюсь восстановить state из Telegram-бэкапа...")
+        updates = await bot.get_updates(limit=100, timeout=5)
+        # Ищем последний документ state_backup.json в ЛС с ADMIN
+        for upd in reversed(updates):
+            msg = getattr(upd, "message", None)
+            if not msg:
+                continue
+            if getattr(getattr(msg, "chat", None), "id", None) != ADMIN_ID:
+                continue
+            doc = getattr(msg, "document", None)
+            if not doc:
+                continue
+            if doc.file_name not in ("state_backup.json", "state.json"):
+                continue
+            # Нашли — скачиваем
+            buf = BytesIO()
+            await bot.download(doc, destination=buf)
+            buf.seek(0)
+            data = json.load(buf)
+            _apply_state_data(data)
+            # Сохраняем локально
+            with open(STATE_FILE, "w", encoding="utf-8") as f:
+                json.dump(STATE, f, ensure_ascii=False)
+            log.info("State восстановлен из Telegram-бэкапа (файл: %s)", doc.file_name)
+            return True
+    except Exception as e:
+        log.warning("Не удалось восстановить state из Telegram: %s", e)
+    return False
+
+# Счётчик для throttle бэкапов: не чаще раза в 60 сек
+_last_tg_backup: float = 0.0
+
+async def save_state_backup_to_telegram() -> None:
+    """Отправляет state.json себе в ЛС как бэкап. Throttle: не чаще раза в 60 сек."""
+    global _last_tg_backup
+    if not TG_STATE_BACKUP:
+        return
+    now_ts = time.time()
+    if now_ts - _last_tg_backup < 60:
+        return
+    _last_tg_backup = now_ts
+    try:
+        state_bytes = json.dumps(STATE, ensure_ascii=False).encode("utf-8")
+        file = BufferedInputFile(state_bytes, filename="state_backup.json")
+        await bot.send_document(ADMIN_ID, file, caption="💾 Авто-бэкап state")
+    except Exception as e:
+        log.warning("Не удалось отправить бэкап state в Telegram: %s", e)
 
 def migrate_state() -> None:
     old, new = "Измаил Водфон", "Измаил Водафон"
@@ -201,6 +264,12 @@ def save_state() -> None:
         os.replace(tmp, STATE_FILE)
     except Exception as e:
         log.warning("Не удалось сохранить состояние: %s", e)
+    # Фоновый бэкап в Telegram (не блокирует, throttle 60 сек)
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(save_state_backup_to_telegram())
+    except RuntimeError:
+        pass  # нет event loop — при старте это нормально
 
 def env_chat_ids() -> list:
     ids = []
@@ -2439,19 +2508,51 @@ async def main() -> None:
         log.warning("get_me не удался: %s", e)
     asyncio.create_task(scheduler_loop())
     log.info("Бот запущен. Время в Одессе: %s", now().strftime("%Y-%m-%d %H:%M"))
-    
-    try:
-        await bot.send_message(
-            ADMIN_ID,
-            "🔄 <b>Я только что перезапустился!</b>\n\n"
-            "Скинь мне файл result.json (экспорт истории из Telegram Desktop), "
-            "чтобы я всё актуализировал и не наспамил ложными напоминаниями.\n\n"
-            "<i>(Если свежей истории нет, используй интерактивные кнопки ниже для управления)</i>.",
-            parse_mode="HTML",
-            reply_markup=admin_main_keyboard()
+
+    # Пытаемся восстановить state из Telegram-бэкапа (для Render ephemeral disk)
+    restored = await restore_state_from_telegram()
+
+    n = now()
+    history_days = len(STATE.get("history", {}))
+    today_reports = sum(
+        1 for s in STATE["history"].get(n.date().isoformat(), {}).values()
+        if any(w in s for w in ("morning", "midday", "evening"))
+    )
+
+    if restored and history_days > 0:
+        # State восстановлен из бэкапа — проверяем есть ли отчёты за сегодня
+        if today_reports > 0:
+            restart_msg = (
+                f"🔄 <b>Перезапустился и восстановил данные из бэкапа!</b>\n\n"
+                f"📦 История: {history_days} дн. | Отчётов за сегодня: {today_reports}\n\n"
+                f"⚠️ Для полной синхронизации за сегодня скинь свежий <b>result.json</b> "
+                f"(экспорт из Telegram Desktop за {n.strftime('%d.%m')}).\n"
+                f"<i>Или нажми «Запустить» — буду работать с тем что есть.</i>"
+            )
+        else:
+            restart_msg = (
+                f"🔄 <b>Перезапустился, бэкап восстановлен (история {history_days} дн.)</b>\n\n"
+                f"📭 Отчётов за сегодня ({n.strftime('%d.%m')}) в бэкапе нет.\n\n"
+                f"Скинь <b>result.json</b> со свежим экспортом чата за сегодня — "
+                f"тогда я узнаю кто уже сдал и не буду слать лишние пуши.\n"
+                f"<i>Или нажми «Запустить» — подожду 2 мин и сам разберусь.</i>"
+            )
+    else:
+        # Ни локального файла, ни бэкапа — чистый старт
+        restart_msg = (
+            f"🔄 <b>Я только что перезапустился!</b> Память чистая.\n\n"
+            f"📋 Скинь мне <b>result.json</b> (экспорт истории из Telegram Desktop) "
+            f"за <b>сегодня ({n.strftime('%d.%m')})</b>, чтобы я знал кто уже сдал отчёты.\n\n"
+            f"⚠️ Файл должен быть свежим — экспортируй прямо сейчас из Telegram Desktop.\n"
+            f"Если скинешь вчерашний — данные за сегодня всё равно будут пустые.\n\n"
+            f"<i>Или нажми «Запустить» без файла — подожду 2 мин (pending updates) и начну работу.</i>"
         )
+
+    try:
+        await bot.send_message(ADMIN_ID, restart_msg, parse_mode="HTML",
+                               reply_markup=admin_main_keyboard())
     except Exception as e:
-        log.warning(f"Не удалось отправить уведомление админу {ADMIN_ID} о рестарте: {e}")
+        log.warning("Не удалось отправить уведомление админу о рестарте: %s", e)
 
     await dp.start_polling(bot, allowed_updates=["message", "edited_message", "message_reaction", "callback_query"])
 
