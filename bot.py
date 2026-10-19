@@ -1425,6 +1425,31 @@ def build_plan(n: datetime) -> str:
             lines.append(f"• {max(start, n):%H:%M} - {title}")
     return "\n".join(lines) if lines else "На сегодня больше плановых задач нет."
 
+async def _grace_period_notify(n: datetime) -> None:
+    """Через 120 сек после активации — шлём в ЛС актуальный список должников."""
+    await asyncio.sleep(120)
+    bd = biz_date(n).isoformat()
+    lines = [f"✅ <b>Данные актуальны. Отчёты за {n.strftime('%d.%m')}:</b>"]
+    all_ok = True
+    for win, title in (("morning", "Утро"), ("midday", "Обед"), ("evening", "Вечер")):
+        reported = set(day_entries(bd, win))
+        expected = expected_stores(win, bd)
+        if not expected:
+            continue
+        missing = sorted(expected - reported)
+        if missing:
+            all_ok = False
+            lines.append(f"<b>{title} ({len(reported)}/{len(expected)}):</b> {', '.join(missing)}")
+        else:
+            lines.append(f"<b>{title}:</b> ✅ все сдали")
+    if all_ok:
+        lines.append("🎉 Все магазины сдали отчёты за все окна!")
+    try:
+        await bot.send_message(ADMIN_ID, "\n".join(lines), parse_mode="HTML",
+                               reply_markup=admin_reports_keyboard())
+    except Exception as e:
+        log.warning("Не удалось отправить уведомление после grace period: %s", e)
+
 def force_resume(n: datetime) -> None:
     done = STATE["done"].setdefault(n.date().isoformat(), [])
     for slot_id, h, minute, _, _ in SLOTS:
@@ -1436,6 +1461,7 @@ def force_resume(n: datetime) -> None:
     RT.is_suspended = False
     RT.awaiting_history = False
     RT.resumed_ts = time.time()
+    asyncio.create_task(_grace_period_notify(n))
 
 # ============================ КЛАВИАТУРЫ И МЕНЮ ЛС ============================
 def admin_main_keyboard() -> InlineKeyboardMarkup:
@@ -1471,12 +1497,22 @@ def admin_jokes_keyboard() -> InlineKeyboardMarkup:
 
 def admin_reports_keyboard() -> InlineKeyboardMarkup:
     pm_push_label = "Вкл (ЛС)" if STATE.get("pm_push_enabled", True) else "Выкл (Общий чат)"
+    in_grace = bool(RT.resumed_ts and time.time() - RT.resumed_ts < 120)
+    if in_grace:
+        secs_left = int(120 - (time.time() - RT.resumed_ts))
+        debtor_buttons = [
+            [InlineKeyboardButton(text=f"⏳ Данные загружаются... ({secs_left} сек)", callback_data="admin:grace_info")],
+        ]
+    else:
+        debtor_buttons = [
+            [InlineKeyboardButton(text="🎯 Точечный пуш должников", callback_data="admin:push")],
+            [InlineKeyboardButton(text="📋 Должники списком", callback_data="admin:missing")],
+        ]
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=f"🔀 Пуш должников в ЛС: {pm_push_label}", callback_data="admin:toggle_pm_push")],
         [InlineKeyboardButton(text="📊 Аналитика вайба", callback_data="admin:vibe")],
-        [InlineKeyboardButton(text="🎯 Точечный пуш должников", callback_data="admin:push")],
+        *debtor_buttons,
         [InlineKeyboardButton(text="📊 Статистика за сегодня", callback_data="admin:stats")],
-        [InlineKeyboardButton(text="📋 Должники списком", callback_data="admin:missing")],
         [InlineKeyboardButton(text="🔙 Главное меню", callback_data="menu:main")]
     ])
 
@@ -1969,12 +2005,17 @@ async def on_callback_query(callback: CallbackQuery) -> None:
             return
 
         if data == "admin:missing":
+            # Пока pending updates ещё обрабатываются — не показываем список:
+            # данные заведомо неполные, и пустой список 0/16 только пугает.
+            if RT.resumed_ts and time.time() - RT.resumed_ts < 120:
+                secs_left = int(120 - (time.time() - RT.resumed_ts))
+                await callback.answer(
+                    f"⏳ Подожди ещё {secs_left} сек — бот дообрабатывает входящие сообщения. Данные пока неполные.",
+                    show_alert=True
+                )
+                return
             bd = biz_date(n).isoformat()
             lines = [f"📋 <b>Не сдали отчёты за {bd}:</b>"]
-            if RT.resumed_ts and time.time() - RT.resumed_ts < 120:
-                secs = int(time.time() - RT.resumed_ts)
-                lines.append(f"⚠️ <i>Бот активирован {secs} сек назад — данные могут быть неполными (pending updates). Повторите через {120 - secs} сек.</i>")
-                lines.append("")
             for win, title in (("morning", "Утро"), ("midday", "Обед"), ("evening", "Вечер")):
                 reported = set(day_entries(bd, win))
                 if len(reported) >= 16:
@@ -1986,6 +2027,20 @@ async def on_callback_query(callback: CallbackQuery) -> None:
             await callback.answer()
             return
             
+        if data == "admin:grace_info":
+            if RT.resumed_ts and time.time() - RT.resumed_ts < 120:
+                secs_left = int(120 - (time.time() - RT.resumed_ts))
+                await callback.answer(
+                    f"⏳ Бот дообрабатывает входящие сообщения из очереди Telegram.\n"
+                    f"Кнопки должников станут активны через ~{secs_left} сек.",
+                    show_alert=True
+                )
+            else:
+                # Grace period уже прошёл — обновляем клавиатуру на нормальную
+                await callback.message.edit_reply_markup(reply_markup=admin_reports_keyboard())
+                await callback.answer("✅ Данные актуальны, кнопки разблокированы.")
+            return
+
         if data == "admin:state":
             state_str = json.dumps(STATE, ensure_ascii=False, indent=2)
             file = BufferedInputFile(state_str.encode('utf-8'), filename="state.json")
