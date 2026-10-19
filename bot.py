@@ -98,7 +98,7 @@ USER_ID_BY_STORE = {v: k for k, v in STORE_BY_USER_ID.items()}
 
 ALLOWED = {
     "👍", "🔥", "🎉", "🤩", "😎", "🏆", "💯", "⚡", "🤝", "👌", "🫡", "🤗", "🙏", "👀",
-    "❤", "🤣", "😁", "👏", "💅", "🦄", "✅", "😔", "😢"
+    "❤", "🤣", "😁", "👏", "💅", "🦄", "✅", "😔", "😢", "😲", "🤯"
 }
 POSITIVE = {"👍", "🔥", "❤", "🎉", "🤩", "😎", "👏", "💯", "⚡", "🏆"}
 NEGATIVE = {"👎", "🤡", "💩", "🥱", "🤮", "🤬", "🤨"}
@@ -874,7 +874,7 @@ def can_speak(n: datetime, gap: bool = True, jokes: bool = False, ignore_mute: b
         return False
     return True
 
-async def say(text: str, msg: Message | None = None, html: bool = False, track_deletable: bool = False) -> bool:
+async def say(text: str, msg: Message | None = None, html: bool = False, track_deletable: bool = False, msg_type: str = "joke") -> bool:
     mode = get_bot_mode()
     if mode == "stop":
         return False
@@ -898,7 +898,7 @@ async def say(text: str, msg: Message | None = None, html: bool = False, track_d
                 return False
             
         if track_deletable:
-            RT.bot_msgs[sent.message_id] = {"neg": set(), "text": text}
+            RT.bot_msgs[sent.message_id] = {"neg": set(), "text": text, "type": msg_type}
             if len(RT.bot_msgs) > 50:
                 oldest = next(iter(RT.bot_msgs))
                 del RT.bot_msgs[oldest]
@@ -916,7 +916,7 @@ async def maybe_send_tech_reply(message: Message, n: datetime) -> bool:
     day_key = n.date().isoformat()
     if STATE.get("tech_reply_date", "") == day_key:
         return False
-    sent = await say(random.choice(TECH_REPLIES), message, track_deletable=True)
+    sent = await say(random.choice(TECH_REPLIES), message, track_deletable=True, msg_type="joke")
     if sent:
         STATE["tech_reply_date"] = day_key
         save_state()
@@ -1245,21 +1245,38 @@ async def on_reaction(ev: MessageReactionUpdated):
             msg_data = RT.bot_msgs[ev.message_id]
             
             if isinstance(msg_data, set):
-                msg_data = {"neg": msg_data, "text": ""}
+                msg_data = {"neg": msg_data, "text": "", "type": "joke"}
                 RT.bot_msgs[ev.message_id] = msg_data
 
-            if new_emojis & NEGATIVE:
-                msg_data["neg"].add(ev.user.id)
+            m_type = msg_data.get("type", "joke")
+
+            if m_type == "reminder":
+                cancel_emojis = NEGATIVE | {"😲", "🤯", "👀"}
+                if new_emojis & cancel_emojis:
+                    try:
+                        await bot.edit_message_text("Сообщение удалено.", chat_id=ev.chat.id, message_id=ev.message_id)
+                    except Exception:
+                        pass
+                    del RT.bot_msgs[ev.message_id]
+                    await send_chat_message(ev.chat.id, "Кажется, мои алгоритмы подсчёта дали сбой. Умолкаю, пока не починят 🤐")
+                    mute_for(120)
+                    return
             else:
-                msg_data["neg"].discard(ev.user.id)
-            
-            if len(msg_data["neg"]) >= 3:
-                await bot.delete_message(ev.chat.id, ev.message_id)
-                del RT.bot_msgs[ev.message_id]
-                mute_for(120) 
-                if get_bot_mode() in ("active", "no_jokes"):
-                    await send_chat_message(ev.chat.id, random.choice(ZOOMER_PHRASES))
-                return
+                if new_emojis & NEGATIVE:
+                    msg_data["neg"].add(ev.user.id)
+                else:
+                    msg_data["neg"].discard(ev.user.id)
+                
+                if len(msg_data["neg"]) >= 3:
+                    try:
+                        await bot.edit_message_text("Сообщение удалено.", chat_id=ev.chat.id, message_id=ev.message_id)
+                    except Exception:
+                        pass
+                    del RT.bot_msgs[ev.message_id]
+                    mute_for(120) 
+                    if get_bot_mode() in ("active", "no_jokes"):
+                        await send_chat_message(ev.chat.id, random.choice(ZOOMER_PHRASES))
+                    return
 
             if new_emojis & POSITIVE:
                 fans = STATE.setdefault("fans", {})
@@ -1267,7 +1284,7 @@ async def on_reaction(ev: MessageReactionUpdated):
                 fans[uname] = fans.get(uname, 0) + 1
                 
                 txt = msg_data.get("text", "")
-                if txt:
+                if txt and m_type == "joke":
                     key = _joke_key(_joke_norm(txt))
                     for j in _jokes_used():
                         if j.get("k") == key:
@@ -1305,7 +1322,7 @@ async def handle_command(message: Message, cmd: str) -> None:
             return
         if time.time() - RT.last_bot > 120 and not jokes_temporarily_paused():
             joke = queued_joke_for(n)
-            if await say(joke, message, track_deletable=True):
+            if await say(joke, message, track_deletable=True, msg_type="joke"):
                 mark_joke_used(joke)
                 STATE["queued_joke"] = None
                 save_state()
@@ -1574,7 +1591,6 @@ def admin_jokes_keyboard() -> InlineKeyboardMarkup:
     ])
 
 def admin_reports_keyboard() -> InlineKeyboardMarkup:
-    pm_push_label = "Вкл (ЛС)" if STATE.get("pm_push_enabled", True) else "Выкл (Общий чат)"
     in_grace = bool(RT.resumed_ts and time.time() - RT.resumed_ts < 120)
     if in_grace:
         secs_left = int(120 - (time.time() - RT.resumed_ts))
@@ -1587,7 +1603,6 @@ def admin_reports_keyboard() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="📋 Должники списком", callback_data="admin:missing")],
         ]
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"🔀 Пуш должников в ЛС: {pm_push_label}", callback_data="admin:toggle_pm_push")],
         [InlineKeyboardButton(text="📊 Аналитика вайба", callback_data="admin:vibe")],
         *debtor_buttons,
         [InlineKeyboardButton(text="📊 Статистика за сегодня", callback_data="admin:stats")],
@@ -1900,13 +1915,6 @@ async def on_callback_query(callback: CallbackQuery) -> None:
             await callback.answer("Отправлено в чат!")
             return
 
-        if data == "admin:toggle_pm_push":
-            STATE["pm_push_enabled"] = not STATE.get("pm_push_enabled", True)
-            save_state()
-            await send_fresh_menu(callback, admin_panel_text("Настройка режима пуша сохранена"), admin_reports_keyboard())
-            await callback.answer("Настройка режима пуша сохранена")
-            return
-
         if data == "admin:vibe":
             fans = STATE.setdefault("fans", {})
             top_fans = sorted(fans.items(), key=lambda x: -x[1])[:3]
@@ -1948,31 +1956,21 @@ async def on_callback_query(callback: CallbackQuery) -> None:
             
         if data.startswith("push:"):
             push_store = data.split(":", 1)[1]
-            pm_push = STATE.get("pm_push_enabled", True)
             
-            if pm_push:
-                target_id = USER_ID_BY_STORE.get(push_store)
-                if not target_id:
-                    await callback.answer("❌ ID магазина не найден в базе.", show_alert=True)
-                    return
-                    
-                try:
-                    await bot.send_message(target_id, "⏳ Напоминаю: время сдавать отчёт. Жду цифры в общем чате!")
-                    STATE.setdefault("pending_report_push", {})[target_id] = time.time()
-                    save_state()
-                    
-                    await send_fresh_menu(callback, f"✅ Пуш отправлен в ЛС магазину {escape(push_store)}!", admin_reports_keyboard())
-                    await callback.answer("Отправлено в ЛС")
-                except Exception:
-                    await callback.answer("❌ Ошибка! Бот заблокирован магазином в ЛС.", show_alert=True)
-            else:
-                cid = get_chat_id()
-                if not cid:
-                    await callback.answer("ID чата не настроен.", show_alert=True)
-                    return
-                await send_chat_message(cid, f"{push_store}, я всё вижу! Где отчёт? 👀")
-                await send_fresh_menu(callback, f"✅ Пуш отправлен в общий чат магазину {escape(push_store)}!", admin_reports_keyboard())
-                await callback.answer("Отправлено в общий чат")
+            target_id = USER_ID_BY_STORE.get(push_store)
+            if not target_id:
+                await callback.answer("❌ ID магазина не найден в базе.", show_alert=True)
+                return
+                
+            try:
+                await bot.send_message(target_id, "⏳ Напоминаю: время сдавать отчёт. Жду цифры в общем чате!")
+                STATE.setdefault("pending_report_push", {})[target_id] = time.time()
+                save_state()
+                
+                await send_fresh_menu(callback, f"✅ Пуш отправлен в ЛС магазину {escape(push_store)}!", admin_reports_keyboard())
+                await callback.answer("Отправлено в ЛС")
+            except Exception:
+                await callback.answer("❌ Ошибка! Бот заблокирован магазином в ЛС.", show_alert=True)
             return
 
         if data == "admin:stats":
@@ -2297,11 +2295,11 @@ async def process(message: Message, edited: bool) -> None:
             RT.group_mentions.append(now_ts)
 
             if len(RT.group_mentions) >= 3:
-                await say(pick_bag("bot_mention_manager", SITUATIONS["bot_mention_manager"]), message, track_deletable=True)
+                await say(pick_bag("bot_mention_manager", SITUATIONS["bot_mention_manager"]), message, track_deletable=True, msg_type="joke")
                 RT.ignore_mentions_until = now_ts + 600
                 RT.group_mentions.clear()
             else:
-                await say(pick_bag("bot_mention_store", SITUATIONS["bot_mention_store"]), message, track_deletable=True)
+                await say(pick_bag("bot_mention_store", SITUATIONS["bot_mention_store"]), message, track_deletable=True, msg_type="joke")
         elif not RT.is_suspended:
             await react(message, ["🤡", "💅", "🗿", "🥱", "👀"])
         return
@@ -2346,7 +2344,8 @@ async def run_slot(kind: str, fallback: bool, n: datetime) -> str:
         return "retry"
 
     text, html = None, False
-    is_joke = False
+    msg_type = "text"
+    track_del = False
     
     if kind == "greeting":
         text = greeting_text(n)
@@ -2379,52 +2378,39 @@ async def run_slot(kind: str, fallback: bool, n: datetime) -> str:
         if not miss:
             return "skip"
             
-        pm_push = STATE.get("pm_push_enabled", True)
-        
         all_reports = day_entries(today, window)
         unidentified = [s for s in all_reports if s not in STORE_NAMES]
         msg = (f"📊 <b>Сводка (окно {window})</b>\n"
                f"Собрано отчетов: {len(all_reports)}/16\n"
-               f"Статус: ⚠️ Отправлен пуш ({'в ЛС' if pm_push else 'в группу'})\n"
+               f"Статус: ⚠️ Отправлено напоминание в группу\n"
                f"Не идентифицированы ({len(unidentified)} шт): {', '.join(unidentified)}")
         try:
             await bot.send_message(ADMIN_ID, msg, parse_mode="HTML")
         except Exception:
             pass
 
-        label = "утренний отчёт" if window == "morning" else "обеденный отчёт"
+        label_cap = "☕ Утренний отчёт" if window == "morning" else "⏳ Обеденный отчёт"
+        shown = ", ".join(miss[:8])
+        more = f" и ещё {len(miss) - 8}" if len(miss) > 8 else ""
+        text = f"{label_cap} ещё ждём от: {shown}{more}. Коллеги, пожалуйста, не забываем 🙏"
+        msg_type = "reminder"
+        track_del = True
         
-        if pm_push:
-            for m in miss:
-                target_id = USER_ID_BY_STORE.get(m)
-                if target_id:
-                    try:
-                        await bot.send_message(target_id, f"⏳ Напоминаю: время сдавать {label}. Жду цифры в общем чате!")
-                        STATE.setdefault("pending_report_push", {})[target_id] = time.time()
-                    except Exception:
-                        pass
-            save_state()
-            return "sent"
-        else:
-            label_cap = "☕ Утренний отчёт" if window == "morning" else "⏳ Обеденный отчёт"
-            shown = ", ".join(miss[:8])
-            more = f" и ещё {len(miss) - 8}" if len(miss) > 8 else ""
-            text = f"{label_cap} ещё ждём от: {shown}{more}. Коллеги, не забываем 🙏"
-        
-    if text is None and (kind == "joke" or fallback):
+    if text is None and jokes_kind:
         if jokes_temporarily_paused():
             return "retry"
         text = queued_joke_for(n)
         html = False
-        is_joke = True
+        msg_type = "joke"
+        track_del = True
         
     if text is None:
         return "skip"
     if jokes_kind and text and not can_speak(n, jokes=True):
         return "skip"
         
-    ok = await say(text, html=html, track_deletable=jokes_kind)
-    if ok and is_joke:
+    ok = await say(text, html=html, track_deletable=track_del, msg_type=msg_type)
+    if ok and msg_type == "joke":
         mark_joke_used(text)
         STATE["queued_joke"] = None
         save_state()
