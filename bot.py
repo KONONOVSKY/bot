@@ -141,7 +141,7 @@ STATE: dict = {
     "tech_reply_date": "", "fans": {},
     "bot_mode": "active", "queued_stats": None, "pm_push_enabled": True, 
     "pending_report_push": {}, "custom_jokes": [], "suggested_jokes": {},
-    "last_auto_gen_date": ""
+    "last_auto_gen_date": "", "vibe_history_stats": {}
 }
 
 class RT:
@@ -236,7 +236,7 @@ def is_allowed_chat(cid: int) -> bool:
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# ============================ РАЗБОР ОТЧЁТОВ ============================
+# ============================ РАЗБОР ОТЧЁТОВ И ИСТОРИИ ============================
 CAT_PATTERNS = {
     "to": re.compile(r"^\W*(?:план\s+)?(?:[тt]\s*[оo0]|пт|то)(?![a-zа-я])(?!\s*(?:в\s+)?кредит)\s*(?:план\w*)?\s*[:\-]?\s*(?P<rest>.*)$", re.IGNORECASE),
     "smart": re.compile(r"^\W*(?:смарт|тел|смарты)\b\s*[:\-]?\s*(?P<rest>.*)$", re.IGNORECASE),
@@ -246,6 +246,11 @@ CAT_PATTERNS = {
     "trade": re.compile(r"^\W*(?:трейд|trade)\b\s*(?:ин)?\s*[:\-]?\s*(?P<rest>.*)$", re.IGNORECASE),
     "credit": re.compile(r"^\W*(?:кредит|крдт|то\s+(?:в\s+)?кредит)\b\s*[:\-]?\s*(?P<rest>.*)$", re.IGNORECASE),
 }
+
+def extract_text(text_data) -> str:
+    if isinstance(text_data, list):
+        return "".join([t if isinstance(t, str) else t.get('text', '') for t in text_data])
+    return str(text_data)
 
 def normalize_report_text(text: str) -> str:
     t = text.replace("\u00a0", " ").replace("\u200b", "").replace("\u202f", " ")
@@ -565,7 +570,7 @@ JOKE_ACTIONS = [
     "покупатель берёт рассрочку на чехол",
     "АХО приезжает чинить дверь, но покупает роутер",
     "конкуренты из соседнего магазина приходят за советом",
-    "все смартфоны на витрине одновременно перезагружаются",
+    "все смартфоны на витрине одновременно перезагру নাসзагружаются",
     "кредитный брокер падает в обморок от суммы чека",
     "продавец телепортируется на склад за нужным цветом",
     "клиент вспоминает, что у него вообще-то кнопочная Nokia",
@@ -1353,20 +1358,18 @@ def import_history_json(data: dict, n: datetime):
     bot_all = []
     bot_jokes = []
     last_mgr = None
+    
+    # Сбор аналитики вайба
+    vibe_jokes = []
+    vibe_fans = {}
 
     messages = data.get("messages", [])
     for msg in messages:
         if msg.get("type") != "message":
             continue
-        raw_text = msg.get("text", "")
-        if isinstance(raw_text, list):
-            text_str = "".join(
-                item if isinstance(item, str) else item.get("text", "")
-                for item in raw_text
-            )
-        else:
-            text_str = str(raw_text)
-        text_str = text_str.strip()
+            
+        text_str = extract_text(msg.get("text", "")).strip()
+        
         date_str = msg.get("date")
         try:
             if date_str:
@@ -1391,6 +1394,32 @@ def import_history_json(data: dict, n: datetime):
                 last_mgr = (dt, sender)
         if not text_str:
             continue
+            
+        # ================= АНАЛИЗ ВАЙБА И АНТИ-ОТЧЕТ =================
+        if not any(keyword in text_str for keyword in ["ТО:", "СМАРТ:", "План ТО:", "СЕРВ:"]):
+            reactions = msg.get('reactions', [])
+            laugh_score = 0
+            for r in reactions:
+                emoji = r.get('emoji', '')
+                count = r.get('count', 0)
+                if emoji in ['🤣', '😁', '😂']:
+                    laugh_score += count
+                # Собираем социальных фанатов, если есть блок recent (или просто считаем реакции)
+                recent_users = r.get('recent', [])
+                for user_info in recent_users:
+                    peer = user_info.get('peer_id', {})
+                    user_name = peer.get('name', '')
+                    if user_name and not is_bot_name(user_name):
+                        vibe_fans[user_name] = vibe_fans.get(user_name, 0) + 1
+
+            if laugh_score > 0:
+                vibe_jokes.append({
+                    'author': sender, 
+                    'text': text_str[:150] + "..." if len(text_str) > 150 else text_str, 
+                    'score': laugh_score
+                })
+        # ==============================================================
+        
         if bot_msg:
             bot_all.append(dt)
             bot_jokes.append((dt, text_str))
@@ -1422,6 +1451,12 @@ def import_history_json(data: dict, n: datetime):
 
     sync_done_from_bot_messages(n, bot_slot_times)
     sync_jokes_from_history(bot_jokes)
+    
+    # Сохраняем статистику вайба в STATE
+    STATE["vibe_history_stats"] = {
+        "top_jokes": sorted(vibe_jokes, key=lambda x: x['score'], reverse=True)[:5],
+        "top_fans": sorted(vibe_fans.items(), key=lambda x: -x[1])[:5]
+    }
     save_state()
 
     return {
@@ -1430,7 +1465,8 @@ def import_history_json(data: dict, n: datetime):
         "author": latest_author,
         "last_mgr": last_mgr,
         "unknown": sorted(unknown),
-        "jokes": joke_stats()
+        "jokes": joke_stats(),
+        "vibe_jokes_count": len(vibe_jokes)
     }
 
 def build_plan(n: datetime) -> str:
@@ -1601,7 +1637,8 @@ async def _process_history_file(message: Message, file_doc) -> None:
             f"Найдено отчётов: {res['parsed']}.",
             f"Синхронизировано до: {res['latest'].strftime('%d.%m %H:%M') if res['latest'] else '?'}.",
             f"Последним писал: {escape(author[0])}{' (руководитель)' if author[1] else ''}.",
-            f"🎭 Шутки: {res['jokes'][0]} из {res['jokes'][1]} уже были — повторять не буду.",
+            f"🎭 Шутки бота: {res['jokes'][0]} из {res['jokes'][1]} уже были — повторять не буду.",
+            f"📊 Найдено живых шуток в истории для вайб-отчета: {res.get('vibe_jokes_count', 0)}.",
         ]
 
         if res["latest"] and res["latest"].date() < n.date():
@@ -1863,16 +1900,19 @@ async def on_callback_query(callback: CallbackQuery) -> None:
             return
 
         if data == "admin:vibe":
-            fans = STATE.setdefault("fans", {})
-            top_fans = sorted(fans.items(), key=lambda x: -x[1])[:3]
-            fans_text = "\n".join(f"👤 {escape(n)} - {c} лайков" for n, c in top_fans) if top_fans else "Нет данных"
-            jokes = _jokes_used()
-            top_jokes = sorted([j for j in jokes if j.get("likes", 0) > 0], key=lambda x: -x.get("likes", 0))[:3]
+            vibe_stats = STATE.get("vibe_history_stats", {})
+            top_jokes = vibe_stats.get("top_jokes", [])
+            top_fans = vibe_stats.get("top_fans", [])
+            
+            fans_text = "\n".join(f"👤 {escape(n)} - {c} лайков/реакций" for n, c in top_fans) if top_fans else "Нет данных из result.json"
+            
             jokes_text = "\n\n".join(
-                f"💬 «{escape(j.get('t', j.get('n', ''))[:60])}...»\n❤️ Лайков: {j.get('likes')}"
+                f"💬 {escape(j.get('author', ''))}:\n«{escape(j.get('text', ''))}»\n❤️ Смех: {j.get('score')}"
                 for j in top_jokes
-            ) if top_jokes else "Нет данных"
-            msg = f"📊 <b>Аналитика вайба</b>\n\n🏆 <b>Топ-3 фаната:</b>\n{fans_text}\n\n🎭 <b>Топ шуток:</b>\n{jokes_text}"
+            ) if top_jokes else "Нет данных из result.json"
+            
+            msg = f"📊 <b>Аналитика вайба (по загруженному result.json)</b>\n\n🏆 <b>Топ фанатов (социальная активность):</b>\n{fans_text}\n\n🎭 <b>Топ шуток (исключая отчеты):</b>\n{jokes_text}"
+            
             await send_fresh_menu(callback, msg, InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="🔙 Назад", callback_data="menu:reports")]
             ]))
