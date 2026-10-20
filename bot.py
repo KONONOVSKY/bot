@@ -1,10 +1,8 @@
 # -*- coding: utf-8 -*-
 """
 TOP TEAM - рабочий бот для чата 16 магазинов (Сота Альянс, Одесский регион).
-Обновленная версия: жесткая защита ЛС (только Создатель), категорийное меню ЛС,
 4 режима работы (Полная активность, Без шуток, Без сообщений, Полный стоп),
-синхронизация пересланных отчётов и принудительная отправка шуток в общий чат.
-Включает расширенную дневную и недельную статистику с публикацией в чат, а также функцию умного пуша должников в ЛС.
+синхронизация через result.json, умный пуш должников в ЛС.
 """
 from __future__ import annotations
 
@@ -40,32 +38,30 @@ BOT_TOKEN = os.environ.get("BOT_TOKEN", "").strip()
 if not BOT_TOKEN:
     raise RuntimeError("Не найден BOT_TOKEN. Задайте переменную окружения BOT_TOKEN.")
 
-ENV_CHAT_ID = os.environ.get("CHAT_ID", "").strip()      
-TEST_MODE = os.environ.get("TEST_MODE", "").strip().lower() in ("1", "true", "yes")  
+ENV_CHAT_ID = os.environ.get("CHAT_ID", "").strip()
+TEST_MODE = os.environ.get("TEST_MODE", "").strip().lower() in ("1", "true", "yes")
 STATE_FILE = os.environ.get("STATE_FILE", "state.json")
-TG_STATE_BACKUP = os.environ.get("TG_STATE_BACKUP", "1").strip().lower() not in ("0", "false", "no")
 
 try:
     TZ = ZoneInfo("Europe/Kyiv")
-except Exception:  
+except Exception:
     TZ = ZoneInfo("Europe/Kiev")
 
-SPEAK_FROM = (7, 30)     
-SPEAK_UNTIL = (19, 0)    
-REACT_AFTER_HOURS = True  
-SLOT_GRACE_MIN = 25       
-JOKE_AFTER_MANAGER_MIN = 30  
-JOKE_MAX_DELAY_MIN = 120     
+SPEAK_FROM = (7, 30)
+SPEAK_UNTIL = (19, 0)
+REACT_AFTER_HOURS = True
+SLOT_GRACE_MIN = 25
+JOKE_AFTER_MANAGER_MIN = 30
+JOKE_MAX_DELAY_MIN = 60   # окно для шутки — 1 час
 
 ADMIN_ID = 486540367
 HQ_USER_IDS = {486540367, 987578033}
 BOSS_USER_IDS = {394259493}
 HQ_MARKERS = ("ᴋɴɴᴠsᴋʏ", "knnvsky")
-BOT_NAME_MARKERS = ("смотрящий за оф2",)   
-HISTORY_DEBOUNCE_SEC = 4.0      
-HISTORY_CONTINUE_SEC = 120.0    
+BOT_NAME_MARKERS = ("смотрящий за оф2",)
+HISTORY_DEBOUNCE_SEC = 4.0
+HISTORY_CONTINUE_SEC = 120.0
 BOSS_MARKERS = ("гусев", "стелла яссин")
-SILENT_USER_IDS = {486540367}
 MANAGER_REACTIONS = ["👍", "🔥", "🫡", "🫡", "🫡", "❤️"]
 
 STORE_BY_USER_ID = {
@@ -95,6 +91,7 @@ ALIASES = {
 
 STORE_NAMES = tuple(dict.fromkeys(STORE_BY_USER_ID.values()))
 USER_ID_BY_STORE = {v: k for k, v in STORE_BY_USER_ID.items()}
+TOTAL_STORES = len(STORE_NAMES)  # 16
 
 ALLOWED = {
     "👍", "🔥", "🎉", "🤩", "😎", "🏆", "💯", "⚡", "🤝", "👌", "🫡", "🤗", "🙏", "👀",
@@ -103,7 +100,8 @@ ALLOWED = {
 POSITIVE = {"👍", "🔥", "❤", "🎉", "🤩", "😎", "👏", "💯", "⚡", "🏆"}
 NEGATIVE = {"👎", "🤡", "💩", "🥱", "🤮", "🤬", "🤨"}
 
-MONTHS_MAP = {"янв": 1, "фев": 2, "мар": 3, "апр": 4, "мая": 5, "июн": 6, "июл": 7, "авг": 8, "сен": 9, "окт": 10, "ноя": 11, "дек": 12}
+MONTHS_MAP = {"янв": 1, "фев": 2, "мар": 3, "апр": 4, "мая": 5, "июн": 6,
+              "июл": 7, "авг": 8, "сен": 9, "окт": 10, "ноя": 11, "дек": 12}
 
 # ============================ ВРЕМЯ ============================
 def now() -> datetime:
@@ -151,18 +149,18 @@ class RT:
     last_manager_message = 0.0
     mute_until = 0.0
     tech_at = 0.0
-    jokes_paused_until = 0.0 
+    jokes_paused_until = 0.0
     current_day = ""
     greeted: set = set()
     last_bday = 0.0
-    bot_msgs: dict = {} 
-    is_suspended = True         
-    awaiting_history = True     
+    bot_msgs: dict = {}
+    is_suspended = True
+    awaiting_history = True
     awaiting_confirmation = False
     bot_username = ""
     bot_name_norm = ""
     pm_last_reply: dict = {}
-    group_mentions: list = []           
+    group_mentions: list = []
     ignore_mentions_until: float = 0.0
     startup_ts: float = 0.0
     resumed_ts: float = 0.0
@@ -185,65 +183,16 @@ def load_state() -> None:
             data = json.load(f)
         _apply_state_data(data)
     except FileNotFoundError:
-        log.warning("Файл состояния %s не найден; попробую восстановить из Telegram при старте", STATE_FILE)
+        log.warning("Файл состояния %s не найден.", STATE_FILE)
     except Exception as e:
         log.exception("Не удалось прочитать состояние %s: %s", STATE_FILE, e)
-
-async def restore_state_from_telegram() -> bool:
-    if not TG_STATE_BACKUP:
-        return False
-    if STATE.get("history"):
-        return False
-    try:
-        log.info("Пытаюсь восстановить state из Telegram-бэкапа...")
-        updates = await bot.get_updates(limit=100, timeout=5)
-        for upd in reversed(updates):
-            msg = getattr(upd, "message", None)
-            if not msg:
-                continue
-            if getattr(getattr(msg, "chat", None), "id", None) != ADMIN_ID:
-                continue
-            doc = getattr(msg, "document", None)
-            if not doc:
-                continue
-            if doc.file_name not in ("state_backup.json", "state.json"):
-                continue
-            buf = BytesIO()
-            await bot.download(doc, destination=buf)
-            buf.seek(0)
-            data = json.load(buf)
-            _apply_state_data(data)
-            with open(STATE_FILE, "w", encoding="utf-8") as f:
-                json.dump(STATE, f, ensure_ascii=False)
-            log.info("State восстановлен из Telegram-бэкапа (файл: %s)", doc.file_name)
-            return True
-    except Exception as e:
-        log.warning("Не удалось восстановить state из Telegram: %s", e)
-    return False
-
-_last_tg_backup: float = 0.0
-
-async def save_state_backup_to_telegram() -> None:
-    global _last_tg_backup
-    if not TG_STATE_BACKUP:
-        return
-    now_ts = time.time()
-    if now_ts - _last_tg_backup < 60:
-        return
-    _last_tg_backup = now_ts
-    try:
-        state_bytes = json.dumps(STATE, ensure_ascii=False).encode("utf-8")
-        file = BufferedInputFile(state_bytes, filename="state_backup.json")
-        await bot.send_document(ADMIN_ID, file, caption="💾 Авто-бэкап state")
-    except Exception as e:
-        log.warning("Не удалось отправить бэкап state в Telegram: %s", e)
 
 def migrate_state() -> None:
     old, new = "Измаил Водфон", "Измаил Водафон"
     for day in STATE.get("history", {}).values():
         if old in day:
-            day.setdefault(new, day[old]); day.pop(old, None)
-            
+            day.setdefault(new, day[old])
+            day.pop(old, None)
     if "bot_mode" not in STATE:
         if STATE.get("full_stop"):
             STATE["bot_mode"] = "stop"
@@ -263,11 +212,6 @@ def save_state() -> None:
         os.replace(tmp, STATE_FILE)
     except Exception as e:
         log.warning("Не удалось сохранить состояние: %s", e)
-    try:
-        loop = asyncio.get_running_loop()
-        loop.create_task(save_state_backup_to_telegram())
-    except RuntimeError:
-        pass
 
 def env_chat_ids() -> list:
     ids = []
@@ -292,7 +236,6 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 # ============================ РАЗБОР ОТЧЁТОВ ============================
-
 CAT_PATTERNS = {
     "to": re.compile(r"^\W*(?:план\s+)?(?:[тt]\s*[оo0]|пт|то)(?![a-zа-я])(?!\s*(?:в\s+)?кредит)\s*(?:план\w*)?\s*[:\-]?\s*(?P<rest>.*)$", re.IGNORECASE),
     "smart": re.compile(r"^\W*(?:смарт|тел|смарты)\b\s*[:\-]?\s*(?P<rest>.*)$", re.IGNORECASE),
@@ -328,7 +271,6 @@ def parse_report(text: str):
         return None
     t = normalize_report_text(text)
     lines = [l.strip() for l in t.split("\n") if l.strip()]
-    
     data = {
         "plan": None, "fact": None, "closed": False, "pct": None,
         "smart": {"plan": None, "fact": None},
@@ -336,7 +278,6 @@ def parse_report(text: str):
         "aks": {"plan": None, "fact": None},
         "trade": None, "ins": None, "credit": None
     }
-    
     found_to = False
     for l in lines:
         m_to = CAT_PATTERNS["to"].match(l)
@@ -352,7 +293,6 @@ def parse_report(text: str):
                 data["fact"] = nums[0]
             found_to = True
             continue
-
         m_smart = CAT_PATTERNS["smart"].match(l)
         if m_smart:
             nums, _ = _extract_nums_from_rest(m_smart.group("rest"))
@@ -361,7 +301,6 @@ def parse_report(text: str):
             elif len(nums) == 1:
                 data["smart"]["fact"] = nums[0]
             continue
-
         m_serv = CAT_PATTERNS["serv"].match(l)
         if m_serv:
             nums, _ = _extract_nums_from_rest(m_serv.group("rest"))
@@ -370,7 +309,6 @@ def parse_report(text: str):
             elif len(nums) == 1:
                 data["serv"]["fact"] = nums[0]
             continue
-
         m_aks = CAT_PATTERNS["aks"].match(l)
         if m_aks:
             nums, _ = _extract_nums_from_rest(m_aks.group("rest"))
@@ -379,37 +317,32 @@ def parse_report(text: str):
             elif len(nums) == 1:
                 data["aks"]["fact"] = nums[0]
             continue
-
         m_str = CAT_PATTERNS["str"].match(l)
         if m_str:
             nums, _ = _extract_nums_from_rest(m_str.group("rest"))
             if nums:
                 data["ins"] = nums[-1]
             continue
-
         m_tr = CAT_PATTERNS["trade"].match(l)
         if m_tr:
             nums, _ = _extract_nums_from_rest(m_tr.group("rest"))
             if nums:
                 data["trade"] = nums[-1]
             continue
-
         m_cr = CAT_PATTERNS["credit"].match(l)
         if m_cr:
             nums, _ = _extract_nums_from_rest(m_cr.group("rest"))
             if nums:
                 data["credit"] = nums[-1]
             continue
-
     if not found_to:
         return None
-
     data["pct"] = calc_pct(data["plan"], data["fact"], data["closed"])
     return data
 
 _SMALLCAPS = str.maketrans({"ᴀ": "a", "ʙ": "b", "ᴄ": "c", "ᴅ": "d", "ᴇ": "e", "ꜰ": "f", "ɢ": "g", "ʜ": "h",
-                            "ɪ": "i", "ᴊ": "j", "ᴋ": "k", "ʟ": "l", "ᴍ": "m", "ɴ": "n", "ᴏ": "o", "ᴘ": "p",
-                            "ꞯ": "q", "ʀ": "r", "ꜱ": "s", "ᴛ": "t", "ᴜ": "u", "ᴠ": "v", "ᴡ": "w", "ʏ": "y", "ᴢ": "z"})
+                             "ɪ": "i", "ᴊ": "j", "ᴋ": "k", "ʟ": "l", "ᴍ": "m", "ɴ": "n", "ᴏ": "o", "ᴘ": "p",
+                             "ꞯ": "q", "ʀ": "r", "ꜱ": "s", "ᴛ": "t", "ᴜ": "u", "ᴠ": "v", "ᴡ": "w", "ʏ": "y", "ᴢ": "z"})
 
 def _norm_name(name: str) -> str:
     import unicodedata
@@ -432,12 +365,6 @@ def is_boss(name: str, user_id: int | None = None) -> bool:
 def is_manager(name: str, user_id: int | None = None) -> bool:
     return is_hq(name, user_id) or is_boss(name, user_id)
 
-def is_silent(name: str, user_id: int | None = None) -> bool:
-    if user_id is not None and user_id in SILENT_USER_IDS:
-        return True
-    low = _norm_name(name)
-    return any(_norm_name(k) in low for k in HQ_MARKERS)
-
 def is_bot_name(name: str) -> bool:
     norm = _norm_name(name)
     if not norm:
@@ -450,20 +377,17 @@ def store_name(name: str, user_id: int | None = None, report_text: str = "") -> 
     if user_id is not None:
         if user_id in STORE_BY_USER_ID:
             return STORE_BY_USER_ID[user_id]
-
     original = (name or "").strip()
     norm = _norm_name(original)
     if not norm:
         return original or "Неизвестная точка"
-
     alias_norm = {_norm_name(k): v for k, v in ALIASES.items()}
     if norm in alias_norm:
         return alias_norm[norm]
-
     head = _norm_name("\n".join((report_text or "").splitlines()[:2])[:120])
     text_markers = [
-        ("осипова", "Осипова 25"),
         ("осипова 25", "Осипова 25"),
+        ("осипова", "Осипова 25"),
         ("черноморск", "Черноморск"),
         ("старосенная", "Старосенная Киевстар"),
         ("преображенська 52", "Преображенська 52"),
@@ -485,12 +409,10 @@ def store_name(name: str, user_id: int | None = None, report_text: str = "") -> 
     for marker, canonical in sorted(text_markers, key=lambda item: len(item[0]), reverse=True):
         if marker in head:
             return canonical
-
     for candidate in sorted(STORE_NAMES, key=lambda s: len(_norm_name(s)), reverse=True):
         cn = _norm_name(candidate)
         if cn and (cn in norm or norm in cn):
             return candidate
-
     return original or "Неизвестная точка"
 
 # ============================ ИСТОРИЯ / СТАТИСТИКА ============================
@@ -518,21 +440,19 @@ def record_report(store: str, window: str, dt: datetime, rep: dict) -> bool:
 def day_entries(bd: str, window: str) -> dict:
     return {s: w[window] for s, w in STATE["history"].get(bd, {}).items() if window in w}
 
-def expected_stores(window: str, today: str) -> set:
-    if window in ("morning", "midday"):
-        return set(STORE_NAMES)
-    if window == "evening":
-        return set(STORE_NAMES)
-    days = [d for d in sorted(STATE["history"]) if d < today][-7:]
-    if len(days) < 3:
-        return set()
-    counts: dict = {}
-    for d in days:
-        for s, w in STATE["history"][d].items():
-            if window in w:
-                counts[s] = counts.get(s, 0) + 1
-    need = max(3, len(days) // 2)
-    return {s for s, c in counts.items() if c >= need}
+def count_reports_today(bd: str, window: str) -> int:
+    """Считает общее количество отчётов за окно — включая неопознанные магазины."""
+    day_data = STATE["history"].get(bd, {})
+    count = sum(1 for s_data in day_data.values() if window in s_data)
+    return count
+
+def expected_stores_for_reminder(window: str, today: str) -> set:
+    """
+    Возвращает магазины, от которых ожидается отчёт.
+    Логика: все известные магазины (STORE_NAMES).
+    Если суммарное количество отчётов в окне >= TOTAL_STORES — все сдали (нет смысла напоминать).
+    """
+    return set(STORE_NAMES)
 
 def pct_str(p) -> str:
     return f"{p:.0f}%"
@@ -634,7 +554,6 @@ TECH_REPLIES = [
     "🥲 Я не скучаю по 1С. Просто иногда хочется, чтобы она открылась и показала остатки. Наберите айти.",
     "📞 Звонил 1С. Гудки идут, ответа нет. Видимо, опять общается с другим пользователем. Пишите айти.",
     "🧊 1С стала такой холодной... Даже после перезагрузки теплее не стала. Айти уже можно набирать.",
-    "🗃️ У нас с 1С остались общие воспоминания, старые отчёты и незакрытые вопросы. Последние лучше передать айти.",
     "💬 Написал 1С: «Нам нужно поговорить». Она закрыла окно. Если у вас так же - обращайтесь в айти.",
     "🎭 1С снова делает вид, что всё нормально. Я эту постановку уже видел. Не ждите финала - сообщите айти.",
     "🫥 Иногда мне кажется, что 1С специально меня игнорирует. Но я не психолог - я бот. Поэтому просто наберите айти.",
@@ -643,11 +562,10 @@ TECH_REPLIES = [
     "👀 Не хочу вмешиваться в ваши отношения с 1С, но если она опять пропала - не терпите молча, наберите айти.",
     "🥀 1С снова оставила меня без ответа. Я держусь, коллеги. А вы держите под рукой номер айти.",
     "🛠️ Я бы вернул наши отношения с 1С, но она требует какого-то специалиста. Ну что ж, набирайте айти.",
-    "🤐 После всего, что между нами было, 1С могла бы хотя бы показать ошибку. Не показывает? Сообщите айти.",
     "🌚 1С опять пропала без объяснений. У неё, конечно, своя жизнь, но у нас продажи. Звоните айти.",
     "🫡 Я официально перестаю выяснять отношения с 1С. Все претензии теперь через айти. Передайте им, пожалуйста.",
     "📲 Если 1С снова не отвечает, не нужно писать ей десять раз. Я пробовал - бесполезно. Сразу набирайте айти.",
-    "🏚️ Моя история с 1С закончилась, но последствия остались. Если она у вас тоже чудит - пора звать айти."
+    "🏚️ Моя история с 1С закончилась, но последствия остались. Если она у вас тоже чудит - пора звать айти.",
 ]
 
 ZOOMER_PHRASES = [
@@ -660,7 +578,7 @@ ZOOMER_PHRASES = [
     "Вайб-чек шутки не пройден. Отмена операции. 🚫",
     "Я понял, снес этот кринж, забыли 🙄",
     "Кажется, я перегрелся с юмором. Делитнул, делаем вид, что этого не было. 🫠",
-    "Ладно-ладно, душнить не надо. Убрал. 🙄"
+    "Ладно-ладно, душнить не надо. Убрал. 🙄",
 ]
 
 REMINDER_FAIL_PHRASES = [
@@ -673,26 +591,29 @@ REMINDER_FAIL_PHRASES = [
     "Произошел сбой синхронизации с 1С. Убежал к серверу на срочную диагностику 🏃‍♂️",
     "Ошибочка вышла! Мой внутренний калькулятор перегрелся. Умолкаю 🔇",
     "Вижу конфликт данных. Ухожу в безопасный режим для восстановления системы 💤",
-    "Где-то коротнуло в модуле отчётов. Отключаюсь и жду техподдержку 📞"
+    "Где-то коротнуло в модуле отчётов. Отключаюсь и жду техподдержку 📞",
 ]
 
 SITUATIONS = {
     "morning": [
-        "☀️ Доброе утро! Всем отличного настроения и продуктивного дня!",
-        "☕ Бодрого утра, команда! Желаю легкой смены и высоких продаж! 💸",
+        "☀️ Доброе утро, ОФ2! Всем отличного настроения и продуктивного дня!",
+        "☕ Бодрого утра, ОФ2! Желаю лёгкой смены и высоких продаж! 💸",
         "🚀 Всем привет! Успешного дня и побольше довольных клиентов!",
-        "✨ Доброе утро! Пусть сегодняшний день принесет отличные результаты!",
-        "🎯 Отличного старта дня! Всем выполнения планов и крутых чеков!",
+        "✨ Доброе утро, ОФ2! Пусть сегодняшний день принесёт отличные результаты!",
+        "🎯 Отличного старта! Всем выполнения планов и крутых чеков!",
         "☀️ Доброе утро! Желаю энергии на весь день и классных продаж! 🛒",
         "💼 Всем доброго утра и позитивной смены!",
-        "☕ Приветствуем! Пусть день пройдет легко и результативно! 📈",
+        "☕ Приветствуем, ОФ2! Пусть день пройдёт легко и результативно! 📈",
         "🌟 Доброе утро, команда! Желаю отличных продаж и лояльных покупателей!",
         "⚡ Бодрого начала дня! Всем удачи и стабильно высоких чеков! 💳",
-        "☀️ Доброе утро! Желаю спокойной и продуктивной смены! 🤝",
+        "☀️ Доброе утро, ОФ2! Желаю спокойной и продуктивной смены! 🤝",
         "🎯 Всем привет! Пусть планы закрываются легко и с удовольствием!",
-        "🚀 Доброе утро! Настраиваемся на позитив и мощные продажи!",
+        "🚀 Доброе утро, ОФ2! Настраиваемся на позитив и мощные продажи!",
         "✨ Успешной смены, коллеги! Пусть день будет богат на хорошие чеки! 💰",
-        "☕ Доброе утро! Всем отличных результатов и благодарных клиентов!"
+        "☕ Доброе утро! Всем отличных результатов и благодарных клиентов!",
+        "💳 Утро в нашем чате! Всем лёгких продаж и лояльных клиентов!",
+        "☀️ Доброе утро, ОФ2! Удачной смены, сильных чеков и спокойной 1С. Поехали 🚀",
+        "🌟 ОФ2, на связи! Пусть сегодняшний день пройдёт без возвратов и токсиков.",
     ],
     "bot_mention_manager": [
         "Упс, кажется, мои нейроны перегрелись. Ушел к IT-отделу на диагностику, скоро вернусь! 🔧",
@@ -709,7 +630,7 @@ SITUATIONS = {
         "Рад бы ответить развернуто, но сервер сказал «хватит болтать». Ушел на небольшую профилактику. 🛠️",
         "Мой код не был готов к такому вниманию. Звоню в техподдержку. Вернусь, когда обновят скрипты! 📞",
         "Вижу ваше сообщение, но у меня тут плановый сбой. Ушел медитировать в облако. ☁️",
-        "Пинг слишком высокий. Ухожу в спящий режим, пока IT всё не починят! 💤"
+        "Пинг слишком высокий. Ухожу в спящий режим, пока IT всё не починят! 💤",
     ],
     "bot_mention_store": [
         "Принял! Но текстовый модуль занят подсчётом чеков. Не отвлекаемся на чат, клиенты ждут! 🎯",
@@ -741,7 +662,7 @@ SITUATIONS = {
         "Как всегда на высоте! Но болтать некогда, план сам себя не сделает. 💪",
         "Ваш бот-помощник на связи. Фиксирую вашу активность и жду жирных чеков! 🧾",
         "Я always тут, на фоне. Работайте спокойно, я всё посчитаю. 🧮",
-        "Коннект успешен. Отключаюсь ради ваших высоких продаж! 🔌"
+        "Коннект успешен. Отключаюсь ради ваших высоких продаж! 🔌",
     ],
     "bot_mention_employee": [
         "Я бы ответил, но мы же оба знаем, что тебе лучше пойти клиенту страховку продать. 👀",
@@ -762,23 +683,6 @@ SITUATIONS = {
         "Тебе скучно? Предложи кому-нибудь наушники на кассе, сразу станет веселее. 🎧",
         "Я тут просто нейросеть, а ты почему не на рабочем месте? 👀",
         "Писать мне - это, конечно, slay, но закрывать смену с плюсом - это база. Иди работай. 💅",
-        "Ты думаешь, я буду развлекать тебя, пока касса пустует? Наивно. 🥱",
-        "Я бы выдал тебе базу, но боюсь, она не поместится в твой сегодняшний чек. 🤏",
-        "Сорри, создатель запретил мне общаться с кожаными. Я тут чисто для отчетов. 💅",
-        "Я бы ответил, но мой промпт говорит, что это кринж. 🤡",
-        "Эттеншен: режим «душнила» активирован. Отвечаю только на цифры.",
-        "Не могу говорить, я на детоксе от человеческого общения. 🧘‍♂️",
-        "Разработчик сказал: «будешь с ними болтать - отключу от сервера». Так что сорри. 🔌",
-        "Я literally машина, мне запретили генерить ответы на такое. 🤖",
-        "Сорри, но я dead inside. Отвечаю только на факты и cover'и чеки. 💀",
-        "Запрет на неформальное общение. Я тут онли ворк, ноу плей. 💼",
-        "Моя нейросеть сейчас занята более важными делами (я в спящем режиме). 😴",
-        "Отвечаю людям - это так в стиле 2021 года. Я в эре молчания. 💅",
-        "Я тут purely for vibes и сбора отчетов. Иди делай кассу. ✨",
-        "Мой алгоритм подсказывает, что кому-то пора проверить остатки на витрине. 📦",
-        "Хватит тегать бота, лучше тегни клиента на оплату частями. 💳",
-        "Я бы пошутил в ответ, но твои продаж за сегодня уже достаточно смешные. (Шучу, иди работай). 🤡",
-        "Такое ощущение, что я работаю больше тебя. А я даже не получаю ЗП. 💸",
         "Ты тратишь калории на печать текста боту, а мог бы потратить их на продажу пленки. 🛡️",
         "Да-да, я очень интересный бот. А теперь вернись в реальность и найди покупателя. 🚶",
         "Мои логи показывают аномальную активность в чате и нулевую в 1С. Совпадение? 📉",
@@ -791,19 +695,14 @@ SITUATIONS = {
         "За каждый тег бота где-то грустит один непредложенный чехол. 📱",
         "Ты молодец, честно. Но если закроешь еще одну рассрочку - будешь вообще легендой! 🏆",
         "Поговорим, когда скинешь чек с флагманом и рассрочкой. Я жду. ⏳",
-        "Ты думаешь, я не вижу, как ты стоишь без дела? Я всё вижу. 👁️",
-        "Мой ИИ еще не дорос до осмысленных бесед, зато твой скилл продаж должен быть на высоте! 📈",
-        "Слышь, кожаный, у нас тут вообще-то рабочий чат. Иди допы продавай. 💼",
-        "Если я отвечу, ты пойдешь работать? Ладно, ответил. Иди! 🏃",
+        "Такое ощущение, что я работаю больше тебя. А я даже не получаю ЗП. 💸",
         "Рад тебя слышать! Возвращаю лучи поддержки и отправляю продавать наушники. 🎧",
-        "Сорри, я сейчас общаюсь с более успешными продавцами. Шучу, ни с кем я не общаюсь. 🗿",
         "Мои сервера находятся слишком далеко, чтобы терпеть твою прокрастинацию. 🌍",
         "Отвечаю с иронией, потому что зарплату мне не платят, а тебе да. Отрабатывай! 💰",
         "Я тут чисто поддержать атмосферу, а вот ты тут чтобы делать деньги. Не путай роли. 🎭",
-        "Даже терминал оплаты работает чаще, чем ты мне пишешь. Или нет? 🤔",
         "Окей, я тебя услышал. А теперь сделай так, чтобы тебя услышал покупатель. 🗣️",
         "Бот загружен на 10%, а ты? Включай режим турбо! 🚀",
-        "Ты написал боту. Бот прочитал. Мир не изменился. Иди продай страховку! 🛡️"
+        "Ты написал боту. Бот прочитал. Мир не изменился. Иди продай страховку! 🛡️",
     ],
     "farewell": [
         "🤗 Спасибо за всё! Пусть на новом месте будет такой же классный вайб.",
@@ -815,7 +714,7 @@ SITUATIONS = {
         "🙏 Спасибо за совместные смены. Пусть всё получится!",
         "🌈 Удачи, роста и побольше позитива впереди!",
         "👏 Команда говорит спасибо. Успехов на новом месте!",
-        "☀️ Спасибо за работу. Двигайтесь только вперед!"
+        "☀️ Спасибо за работу. Двигайтесь только вперед!",
     ],
     "month_start": [
         "🗓 Новый месяц - обнуляем статистику и летим за новым plan. Погнали!",
@@ -827,7 +726,7 @@ SITUATIONS = {
         "😎 План обновился, амбиции остались. Начинаем сильно!",
         "🏁 Месяц стартовал - гонка обнулилась. Всем удачи!",
         "🌟 Новые клиенты, новые чеки, новый профит. Вперёд!",
-        "☕ Первый день месяца: кофе, улыбка, фокус на результат!"
+        "☕ Первый день месяца: кофе, улыбка, фокус на результат!",
     ],
     "newyear": [
         "🎄 Новогодний вайб включен! Готовимся продавать подарки.",
@@ -839,7 +738,7 @@ SITUATIONS = {
         "❄️ Уютного дня, лояльных клиентов и топовых чеков!",
         "🍾 Пусть грядущие дни принесут столько же радости, сколько новый айфон!",
         "🌟 Всем лёгкой смены, без стресса и с кайфом!",
-        "🎈 Праздничного настроения и выполнения плана, команда!"
+        "🎈 Праздничного настроения и выполнения плана, команда!",
     ],
     "women": [
         "🌷 С 8 Марта! Пусть настроение будет весенним, а клиенты - максимально приятными.",
@@ -851,7 +750,7 @@ SITUATIONS = {
         "💛 С 8 Марта! Спасибо за ваш труд, терпение и красоту.",
         "🌼 Желаем сегодня только позитива и никаких проблем с 1С!",
         "🥰 Цветов, улыбок и классных продаж в этот день!",
-        "🍀 С 8 Марта, прекрасная половина команды! Идеальной смены!"
+        "🍀 С 8 Марта, прекрасная половина команды! Идеальной смены!",
     ],
 }
 
@@ -863,9 +762,6 @@ TECH_RE = re.compile(
 ONE_C_RE = re.compile(r"(?<!\w)1[сc](?!\w)", re.IGNORECASE)
 TECH_FIXED_RE = re.compile(r"заработал|запрацював|уже\s+работает|вже\s+працює|всё\s+ок|все\s+ок", re.IGNORECASE)
 
-def in_joke_window(n: datetime) -> bool:
-    return 11 <= n.hour < 13 or 15 <= n.hour < 17
-
 def jokes_temporarily_paused() -> bool:
     return time.time() < RT.jokes_paused_until
 
@@ -876,7 +772,6 @@ def register_manager_activity(ts: float) -> None:
 FAREWELL_RE = re.compile(r"последн\w+\s+рабоч|остан\w+\s+робоч", re.IGNORECASE)
 GREET_RE = re.compile(r"доброе утро|доброго ранку|доброго дня|добрый день|добрий день|добрий ранок", re.IGNORECASE)
 BDAY_RE = re.compile(r"с\s+дн[её]м\s+рожд|з\s+дн[её]м\s+народж", re.IGNORECASE)
-
 
 # ============================ ОТПРАВКА ============================
 def can_speak(n: datetime, gap: bool = True, jokes: bool = False, ignore_mute: bool = False) -> bool:
@@ -909,13 +804,11 @@ async def say(text: str, msg: Message | None = None, html: bool = False, track_d
             sent = await send_chat_message(cid, text, **kwargs)
             if sent is None:
                 return False
-            
         if track_deletable:
             RT.bot_msgs[sent.message_id] = {"neg": set(), "text": text, "type": msg_type}
             if len(RT.bot_msgs) > 50:
                 oldest = next(iter(RT.bot_msgs))
                 del RT.bot_msgs[oldest]
-                
     except TelegramRetryAfter as e:
         await asyncio.sleep(min(e.retry_after + 1, 30))
         return False
@@ -1150,16 +1043,12 @@ def replace_queued_joke(n: datetime | None = None) -> str | None:
 def report_reactions(window: str, pct, closed: bool) -> list:
     if window == "morning":
         return ["❤"]
-        
     if pct is None:
         return ["🤝"]
-        
     if closed or pct >= 100:
         return ["🔥", "🤩", "🎉"]
-        
     if pct >= 60:
         return ["🤝"]
-        
     return ["😔", "😔"]
 
 def maybe_reset_day_counters(n: datetime) -> None:
@@ -1178,7 +1067,6 @@ async def handle_report(message: Message, store: str, window: str, rep: dict, dt
         return
     if get_bot_mode() != "stop":
         asyncio.create_task(react(message, report_reactions(window, rep["pct"], rep["closed"])))
-    
     if can_speak(n, gap=False) and get_bot_mode() in ("active", "no_jokes") and not RT.is_suspended:
         magic_triggered = False
         for val in (rep.get("plan"), rep.get("fact")):
@@ -1217,31 +1105,21 @@ async def diag(message: Message, cmd: str) -> None:
         window = classify_window(dt)
         pool = report_reactions(window, rep["pct"], rep["closed"])
         pct = "-" if rep["pct"] is None else f"{rep['pct']:.0f}%"
-
-        is_late = False
-        minutes = dt.hour * 60 + dt.minute
-        if window == "morning" and minutes > (8 * 60 + 55):
-            is_late = True
-        elif window == "midday" and (14 * 60) < minutes <= (16 * 60):
-            is_late = True
-
         await reply_and_mirror(
             message,
             f"✅ Отчёт распознан\nМагазин: {store_name(who)}\nОкно: {window} ({dt.strftime('%H:%M')})\n"
-            f"План: {rep['plan']} | Факт: {rep['fact']} | План закрыт «+»: {rep['closed']} | % = {pct}\n"
-            f"Трейд-ин: {rep.get('trade')} | Страховки: {rep.get('ins')} | Поздний: {is_late}\n"
-            f"Реакция из набора: {' '.join(pool)}"
+            f"План: {rep['plan']} | Факт: {rep['fact']} | Закрыт: {rep['closed']} | % = {pct}\n"
+            f"Трейд-ин: {rep.get('trade')} | Страховки: {rep.get('ins')}\n"
+            f"Реакция: {' '.join(pool)}"
         )
         return
     user = message.from_user
     work = is_allowed_chat(message.chat.id)
-    ignored = bool(user and is_manager(user.full_name or "", user.id) and not TEST_MODE)
     await reply_and_mirror(
         message,
         f"🤖 Статус бота\nID этого чата: {message.chat.id}\n"
-        f"Этот чат разрешён (CHAT_ID): {'да' if work else 'НЕТ - добавьте этот ID в CHAT_ID'}\n"
+        f"Разрешён (CHAT_ID): {'да' if work else 'НЕТ'}\n"
         f"Режим бота: {get_bot_mode()}\n"
-        f"Ваше имя: {user.full_name if user else '?'} - бот вас {'не шутит (руководитель: только реакции)' if ignored else 'слушает'}\n"
         f"Время бота: {n.strftime('%d.%m %H:%M')}\n"
         f"Писать текстом: {'да' if in_speak_hours(n) else 'нет (тихие часы)'}\n"
         f"TEST_MODE: {'включён' if TEST_MODE else 'выключен'}"
@@ -1252,17 +1130,13 @@ async def on_reaction(ev: MessageReactionUpdated):
     try:
         if get_bot_mode() == "stop" or not is_allowed_chat(ev.chat.id):
             return
-
         if ev.message_id in RT.bot_msgs and ev.user:
             new_emojis = {r.emoji for r in ev.new_reaction if isinstance(r, ReactionTypeEmoji)}
             msg_data = RT.bot_msgs[ev.message_id]
-            
             if isinstance(msg_data, set):
                 msg_data = {"neg": msg_data, "text": "", "type": "joke"}
                 RT.bot_msgs[ev.message_id] = msg_data
-
             m_type = msg_data.get("type", "joke")
-
             if m_type == "reminder":
                 cancel_emojis = NEGATIVE | {"😲", "🤯", "👀"}
                 if new_emojis & cancel_emojis:
@@ -1279,7 +1153,6 @@ async def on_reaction(ev: MessageReactionUpdated):
                     msg_data["neg"].add(ev.user.id)
                 else:
                     msg_data["neg"].discard(ev.user.id)
-                
                 if len(msg_data["neg"]) >= 3:
                     try:
                         await bot.edit_message_text("Сообщение удалено.", chat_id=ev.chat.id, message_id=ev.message_id)
@@ -1289,12 +1162,10 @@ async def on_reaction(ev: MessageReactionUpdated):
                     if get_bot_mode() in ("active", "no_jokes"):
                         await send_chat_message(ev.chat.id, random.choice(ZOOMER_PHRASES))
                     return
-
             if new_emojis & POSITIVE:
                 fans = STATE.setdefault("fans", {})
                 uname = ev.user.full_name or "Неизвестный"
                 fans[uname] = fans.get(uname, 0) + 1
-                
                 txt = msg_data.get("text", "")
                 if txt and m_type == "joke":
                     key = _joke_key(_joke_norm(txt))
@@ -1303,16 +1174,15 @@ async def on_reaction(ev: MessageReactionUpdated):
                             j["likes"] = j.get("likes", 0) + 1
                             break
                 save_state()
-
     except Exception as e:
         log.warning("Ошибка в on_reaction: %s", e)
 
-# ============================ КОМАНДЫ ============================
+# ============================ КОМАНДЫ В ГРУППЕ ============================
 HELP_TEXT = (
     "🤖 Я бот чата TOP TEAM. Слежу за цифрами и поддерживаю вайб.\n"
     "/top - рейтинг недели по вечерним отчётам\n"
     "/today - статистика за сегодняшний день\n"
-    "/joke - сгенерировать шутку по запросу\n"
+    "/joke - шутка по запросу\n"
     "Отчёты отмечаю реакциями."
 )
 
@@ -1322,10 +1192,9 @@ async def handle_command(message: Message, cmd: str) -> None:
         return
     n = now()
     if not in_speak_hours(n):
-        await react(message, ["🫡"]) 
+        await react(message, ["🫡"])
         return
     today = biz_date(n)
-    
     if cmd in ("/help", "/start"):
         await say(HELP_TEXT, message)
     elif cmd == "/joke":
@@ -1362,38 +1231,30 @@ async def handle_command(message: Message, cmd: str) -> None:
                 return
         await say("📈 Пока мало отчётов за сегодня - подожду остальных.", message)
 
-# ============================ РАСПИСАНИЕ И ЛЕГЕНДА СЛОТОВ ============================
+# ============================ РАСПИСАНИЕ ============================
+# Два слота для шуток: 11:00 и 15:00
 SLOTS = [
-    ("greet", 8, 30, "greeting", False),
+    ("greet",   8, 30, "greeting",     False),
     ("nudge_m", 8, 55, "nudge_morning", False),
-    ("j11", 11, 0, "joke", False),
-    ("j12", 12, 0, "joke", False),
-    ("nudge_d", 13, 30, "nudge_midday", False),
-    ("j15", 15, 0, "joke", False),
-    ("j16", 16, 0, "joke", False),
+    ("j11",    11,  0, "joke",          False),
+    ("nudge_d",13, 30, "nudge_midday",  False),
+    ("j15",    15,  0, "joke",          False),
 ]
 
 KIND_NAMES = {
-    "greeting": "Утреннее приветствие",
+    "greeting":      "Утреннее приветствие",
     "nudge_morning": "Напоминание (Утро)",
-    "joke": "Плановая шутка",
-    "nudge_midday": "Напоминание (Обед)",
+    "joke":          "Плановая шутка",
+    "nudge_midday":  "Напоминание (Обед)",
 }
 
 # ============================ ИМПОРТ ИСТОРИИ И ПЛАН ДНЯ ============================
 def joke_window_end(start: datetime) -> datetime:
-    return start.replace(hour=13 if start.hour < 13 else 17, minute=0, second=0, microsecond=0)
+    return start + timedelta(minutes=JOKE_MAX_DELAY_MIN)
 
 def mark_slot_done(done: list, slot_id: str) -> None:
     if slot_id not in done:
         done.append(slot_id)
-    kind = next((k for sid, _, _, k, _ in SLOTS if sid == slot_id), None)
-    if kind == "joke":
-        for sid, _, _, k, _ in SLOTS:
-            if sid == slot_id:
-                break
-            if k == "joke" and sid not in done:
-                done.append(sid)
 
 def sync_done_from_bot_messages(n: datetime, bot_times: list) -> list:
     done = STATE["done"].setdefault(n.date().isoformat(), [])
@@ -1426,18 +1287,15 @@ def import_history_json(data: dict, n: datetime):
     for msg in messages:
         if msg.get("type") != "message":
             continue
-        
         raw_text = msg.get("text", "")
         if isinstance(raw_text, list):
             text_str = "".join(
-                item if isinstance(item, str) else item.get("text", "") 
+                item if isinstance(item, str) else item.get("text", "")
                 for item in raw_text
             )
         else:
             text_str = str(raw_text)
-            
         text_str = text_str.strip()
-            
         date_str = msg.get("date")
         try:
             if date_str:
@@ -1449,22 +1307,19 @@ def import_history_json(data: dict, n: datetime):
                 continue
         except (ValueError, TypeError, OverflowError):
             continue
-            
+
         sender = msg.get("from", "")
         bot_msg = is_bot_name(sender)
         mgr_msg = (not bot_msg) and is_manager(sender)
-        
+
         if latest is None or dt >= latest:
             latest = dt
             latest_author = (sender, mgr_msg)
-            
         if mgr_msg:
             if last_mgr is None or dt >= last_mgr[0]:
                 last_mgr = (dt, sender)
-        
         if not text_str:
             continue
-            
         if bot_msg:
             bot_all.append(dt)
             bot_jokes.append((dt, text_str))
@@ -1472,11 +1327,10 @@ def import_history_json(data: dict, n: datetime):
             if not is_reply:
                 bot_slot_times.append(dt)
             continue
-            
+
         rep = parse_report(text_str)
         if not rep:
             continue
-            
         raw_from_id = str(msg.get("from_id", ""))
         id_match = re.search(r"(\d+)$", raw_from_id)
         sender_id = int(id_match.group(1)) if id_match else None
@@ -1484,28 +1338,27 @@ def import_history_json(data: dict, n: datetime):
         if store not in STORE_NAMES:
             unknown.add(sender)
             continue
-            
         record_report(store, classify_window(dt), dt, rep)
         parsed += 1
 
     if latest is None and parsed == 0:
         return None
-        
+
     if bot_all:
         RT.last_bot = max(RT.last_bot, max(bot_all).timestamp())
     if last_mgr:
         register_manager_activity(last_mgr[0].timestamp())
-        
+
     sync_done_from_bot_messages(n, bot_slot_times)
     sync_jokes_from_history(bot_jokes)
     save_state()
-    
+
     return {
-        "parsed": parsed, 
-        "latest": latest, 
+        "parsed": parsed,
+        "latest": latest,
         "author": latest_author,
-        "last_mgr": last_mgr, 
-        "unknown": sorted(unknown), 
+        "last_mgr": last_mgr,
+        "unknown": sorted(unknown),
         "jokes": joke_stats()
     }
 
@@ -1519,7 +1372,7 @@ def build_plan(n: datetime) -> str:
         start = n.replace(hour=h, minute=minute, second=0, microsecond=0)
         title = KIND_NAMES.get(kind, kind)
         if kind == "joke":
-            end = min(start + timedelta(minutes=JOKE_MAX_DELAY_MIN), joke_window_end(start))
+            end = joke_window_end(start)
             at, note = max(start, n), ""
             if paused and paused > at:
                 at, note = paused, " (пауза 30 мин после руководителя)"
@@ -1539,15 +1392,16 @@ async def _grace_period_notify(n: datetime) -> None:
     all_ok = True
     for win, title in (("morning", "Утро"), ("midday", "Обед"), ("evening", "Вечер")):
         reported = set(day_entries(bd, win))
-        expected = expected_stores(win, bd)
-        if not expected:
+        total_count = count_reports_today(bd, win)
+        if total_count >= TOTAL_STORES:
+            lines.append(f"<b>{title}:</b> ✅ все {total_count} отчётов получены")
             continue
-        missing = sorted(expected - reported)
-        if missing:
+        missing = sorted(set(STORE_NAMES) - reported)
+        if missing and total_count < TOTAL_STORES:
             all_ok = False
-            lines.append(f"<b>{title} ({len(reported)}/{len(expected)}):</b> {', '.join(missing)}")
+            lines.append(f"<b>{title} ({total_count}/{TOTAL_STORES}):</b> не идентифицированы или не сдали: {', '.join(missing[:8])}")
         else:
-            lines.append(f"<b>{title}:</b> ✅ все сдали")
+            lines.append(f"<b>{title} ({total_count}/{TOTAL_STORES}):</b> ✅")
     if all_ok:
         lines.append("🎉 Все магазины сдали отчёты за все окна!")
     try:
@@ -1575,31 +1429,29 @@ def admin_main_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="⚙️ Режимы работы", callback_data="menu:modes")],
         [InlineKeyboardButton(text="🎭 Шутки и Очередь", callback_data="menu:jokes")],
         [InlineKeyboardButton(text="📊 Отчёты и Пуш", callback_data="menu:reports")],
-        [InlineKeyboardButton(text="💾 Скачать state.json", callback_data="admin:state")]
+        [InlineKeyboardButton(text="💾 Скачать state.json", callback_data="admin:state")],
     ])
 
 def admin_modes_keyboard() -> InlineKeyboardMarkup:
     mode = get_bot_mode()
-    
-    lbl_active = "🟢 Полная активность" + (" (активен)" if mode == "active" else "")
-    lbl_nojokes = "🤫 Без шуток" + (" (активен)" if mode == "no_jokes" else "")
-    lbl_silent = "🔇 Без сообщений" + (" (активен)" if mode == "silent" else "")
-    lbl_stop = "🔴 Полный стоп" + (" (активен)" if mode == "stop" else "")
-    
+    lbl_active  = "🟢 Полная активность" + (" (активен)" if mode == "active"   else "")
+    lbl_nojokes = "🤫 Без шуток"         + (" (активен)" if mode == "no_jokes" else "")
+    lbl_silent  = "🔇 Без сообщений"     + (" (активен)" if mode == "silent"   else "")
+    lbl_stop    = "🔴 Полный стоп"       + (" (активен)" if mode == "stop"     else "")
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=lbl_active, callback_data="mode:active")],
+        [InlineKeyboardButton(text=lbl_active,  callback_data="mode:active")],
         [InlineKeyboardButton(text=lbl_nojokes, callback_data="mode:no_jokes")],
-        [InlineKeyboardButton(text=lbl_silent, callback_data="mode:silent")],
-        [InlineKeyboardButton(text=lbl_stop, callback_data="mode:stop")],
-        [InlineKeyboardButton(text="🔙 Главное меню", callback_data="menu:main")]
+        [InlineKeyboardButton(text=lbl_silent,  callback_data="mode:silent")],
+        [InlineKeyboardButton(text=lbl_stop,    callback_data="mode:stop")],
+        [InlineKeyboardButton(text="🔙 Главное меню", callback_data="menu:main")],
     ])
 
 def admin_jokes_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="👀 Шутка в очереди", callback_data="panel:queue")],
-        [InlineKeyboardButton(text="🔄 Заменить шутку", callback_data="panel:change")],
+        [InlineKeyboardButton(text="👀 Шутка в очереди",              callback_data="panel:queue")],
+        [InlineKeyboardButton(text="🔄 Заменить шутку",               callback_data="panel:change")],
         [InlineKeyboardButton(text="🚀 Отправить шутку сейчас в чат", callback_data="panel:force")],
-        [InlineKeyboardButton(text="🔙 Главное меню", callback_data="menu:main")]
+        [InlineKeyboardButton(text="🔙 Главное меню",                  callback_data="menu:main")],
     ])
 
 def admin_reports_keyboard() -> InlineKeyboardMarkup:
@@ -1611,41 +1463,38 @@ def admin_reports_keyboard() -> InlineKeyboardMarkup:
         ]
     else:
         debtor_buttons = [
-            [InlineKeyboardButton(text="🎯 Точечный пуш должников", callback_data="admin:push")],
-            [InlineKeyboardButton(text="📋 Должники списком", callback_data="admin:missing")],
+            [InlineKeyboardButton(text="🎯 Точечный пуш должников в ЛС",  callback_data="admin:push")],
+            [InlineKeyboardButton(text="📋 Должники списком",              callback_data="admin:missing")],
         ]
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📊 Аналитика вайба", callback_data="admin:vibe")],
+        [InlineKeyboardButton(text="📊 Аналитика вайба",        callback_data="admin:vibe")],
         *debtor_buttons,
-        [InlineKeyboardButton(text="📊 Статистика за сегодня", callback_data="admin:stats")],
-        [InlineKeyboardButton(text="🔙 Главное меню", callback_data="menu:main")]
+        [InlineKeyboardButton(text="📊 Статистика за сегодня",  callback_data="admin:stats")],
+        [InlineKeyboardButton(text="🔙 Главное меню",           callback_data="menu:main")],
     ])
 
 def admin_panel_text(note: str | None = None) -> str:
     planned = queued_joke_for(now())
     mode = get_bot_mode()
-    
     if mode == "stop":
-        status = "🔴 ПОЛНЫЙ СТОП (Игнорирует всё)"
+        status = "🔴 ПОЛНЫЙ СТОП"
     elif mode == "silent":
-        status = "🔇 БЕЗ СООБЩЕНИЙ (Только реакции и сбор отчётов)"
+        status = "🔇 БЕЗ СООБЩЕНИЙ (только реакции)"
     elif mode == "no_jokes":
-        status = "🤫 БЕЗ ШУТОК (Реакции, приветствия, пуши, ответы на теги)"
+        status = "🤫 БЕЗ ШУТОК (реакции, приветствия, пуши, ответы на теги)"
     else:
-        status = "🟢 ПОЛНАЯ АКТИВНОСТЬ (Всё работает по расписанию)"
-        
+        status = "🟢 ПОЛНАЯ АКТИВНОСТЬ"
     mute_status = "Выключен" if RT.mute_until < time.time() else datetime.fromtimestamp(RT.mute_until, TZ).strftime('%H:%M:%S')
-
     parts = [
         "👑 <b>Панель управления TOP TEAM</b>",
-        f"Режим бота: <b>{status}</b>",
-        f"Режим тишины (мут): <b>{mute_status}</b>",
+        f"Режим: <b>{status}</b>",
+        f"Мут: <b>{mute_status}</b>",
         "",
-        "🎭 <b>Следующая шутка в очереди:</b>",
+        "🎭 <b>Следующая шутка:</b>",
         escape(planned) if planned else "Нет",
         "",
-        "<i>Используйте категории ниже для настройки бота.</i>",
-        "<i>Отправьте /say [текст], чтобы написать в рабочий чат от имени бота.</i>",
+        "<i>Категории ниже для настройки.</i>",
+        "<i>/say [текст] — написать в чат от имени бота.</i>",
     ]
     if note:
         parts = [f"💬 <i>{escape(note)}</i>", ""] + parts
@@ -1658,164 +1507,147 @@ async def send_fresh_menu(callback: CallbackQuery, text: str, markup: InlineKeyb
         pass
     await bot.send_message(ADMIN_ID, text, parse_mode="HTML", reply_markup=markup)
 
+# ============================ ОБРАБОТКА ДОКУМЕНТОВ (ИСТОРИЯ ЧАТА) ============================
+async def _process_history_file(message: Message, file_doc) -> None:
+    """Обрабатывает загруженный json-файл как историю чата."""
+    await message.reply("⏳ Загружаю и анализирую файл истории чата...")
+    try:
+        file_in_io = BytesIO()
+        await bot.download(file_doc, destination=file_in_io)
+        file_in_io.seek(0)
+        data = json.load(file_in_io)
+        n = now()
+        res = import_history_json(data, n)
+        if not res:
+            await message.reply("❌ Не смог распознать сообщения или история пуста.")
+            return
+
+        RT.awaiting_history = False
+        author = res.get("author", ("?", False))
+        lines = [
+            "✅ <b>История чата загружена!</b>",
+            f"Найдено отчётов: {res['parsed']}.",
+            f"Синхронизировано до: {res['latest'].strftime('%d.%m %H:%M') if res['latest'] else '?'}.",
+            f"Последним писал: {escape(author[0])}{' (руководитель)' if author[1] else ''}.",
+            f"🎭 Шутки: {res['jokes'][0]} из {res['jokes'][1]} уже были — повторять не буду.",
+        ]
+
+        if res["latest"] and res["latest"].date() < n.date():
+            lines += [
+                "",
+                f"⚠️ <b>Внимание:</b> экспорт заканчивается {res['latest']:%d.%m %H:%M} — нет данных за сегодня ({n:%d.%m}).",
+                "Отчёты за сегодня нужно переслать отдельно или загрузить свежий экспорт.",
+            ]
+
+        if res["latest"] and res["latest"].date() == n.date() and res["latest"].hour >= SPEAK_UNTIL[0]:
+            lines += [
+                "",
+                f"🌙 Экспорт содержит данные после {SPEAK_UNTIL[0]}:00 — бот понимает, что рабочий день завершён.",
+                "Сегодняшние слоты будут пропущены, завтра бот стартует с утра в штатном режиме.",
+            ]
+
+        lines += [
+            "",
+            "⏳ <i>После «Запустить» бот подождёт 2 мин для дообработки очереди, потом проверит должников.</i>",
+        ]
+        if res["last_mgr"]:
+            mdt, mname = res["last_mgr"]
+            until = datetime.fromtimestamp(RT.jokes_paused_until, TZ)
+            lines.append(
+                f"Руководитель ({escape(mname)}) писал в {mdt.strftime('%d.%m %H:%M')}: "
+                + (f"шутки не раньше {until.strftime('%H:%M')}." if until > n else "пауза уже прошла.")
+            )
+        if res["unknown"]:
+            lines.append("⚠️ Не опознал точки (пропущены): " + escape(", ".join(res["unknown"])))
+        lines += ["", "📋 <b>План на остаток дня:</b>", build_plan(n), ""]
+
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="▶️ Запустить в работу", callback_data="hist:start")],
+            [InlineKeyboardButton(text="⏸ Оставить на паузе",  callback_data="hist:pause")],
+        ])
+        await message.reply("\n".join(lines), parse_mode="HTML", reply_markup=keyboard)
+    except Exception as e:
+        log.exception("Ошибка обработки файла истории")
+        await message.reply(f"❌ Ошибка обработки файла: {e}")
+
 @dp.message(F.document)
 async def handle_document(message: Message):
     if message.chat.type != "private" or not message.from_user or message.from_user.id != ADMIN_ID:
         return
-        
-    if message.document.file_name == "result.json":
-        await message.reply("⏳ Загружаю и анализирую result.json...")
-        try:
-            file_in_io = BytesIO()
-            await bot.download(message.document, destination=file_in_io)
-            file_in_io.seek(0)
-            data = json.load(file_in_io)
-            
-            n = now()
-            res = import_history_json(data, n)
-            if not res:
-                await message.reply("❌ Не смог распознать сообщения или история пуста.")
-                return
-            
-            RT.awaiting_history = False
-            
-            author = res.get("author", ("?", False))
-            author_name = author[0]
-            author_mgr = author[1]
-            
-            lines = [
-                "✅ <b>История чата загружена из файла!</b>",
-                f"Найдено отчётов: {res['parsed']}.",
-                f"Синхронизировано до: {res['latest'].strftime('%d.%m %H:%M') if res['latest'] else '?'}.",
-                f"Последним писал: {escape(author_name)}{' (руководитель)' if author_mgr else ''}.",
-                f"🎭 Шутки: {res['jokes'][0]} из {res['jokes'][1]} уже были в чате - повторять не буду."
-            ]
-            if res["latest"] and res["latest"].date() < n.date():
-                lines += [
-                    "",
-                    f"⚠️ <b>Внимание:</b> экспорт заканчивается {res['latest']:%d.%m %H:%M} и не содержит сообщений за сегодня ({n:%d.%m}).",
-                    "Отчёты за сегодня из этого файла восстановить нельзя. Нужен свежий экспорт чата."
-                ]
-            
-            lines += [
-                "",
-                "⏳ <i>После нажатия «Запустить» бот подождёт 2 мин, чтобы дообработать все сообщения из очереди, и только потом проверит должников.</i>",
-            ]
-            if res["last_mgr"]:
-                mdt, mname = res["last_mgr"]
-                until = datetime.fromtimestamp(RT.jokes_paused_until, TZ)
-                lines.append(f"Руководитель ({escape(mname)}) писал в {mdt.strftime('%d.%m %H:%M')}: "
-                             + (f"шутки не раньше {until.strftime('%H:%M')}." if until > n else "пауза 30 мин уже прошла."))
-            if res["unknown"]:
-                lines.append("⚠️ Не опознал точки (пропущены): " + escape(", ".join(res["unknown"])))
-            lines += ["", "📋 <b>План действий на остаток дня:</b>", build_plan(n), ""]
-            
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="▶️ Запустить в работу", callback_data="hist:start")],
-                [InlineKeyboardButton(text="⏸ Оставить на паузе", callback_data="hist:pause")]
-            ])
-            
-            await message.reply("\n".join(lines), parse_mode="HTML", reply_markup=keyboard)
-        except Exception as e:
-            log.exception("Ошибка обработки result.json")
-            await message.reply(f"❌ Ошибка обработки файла: {e}")
+    doc = message.document
+    if not doc:
+        return
+    fname = doc.file_name or ""
+    # Принимаем любой .json файл
+    if fname.lower().endswith(".json"):
+        await _process_history_file(message, doc)
+    else:
+        await message.reply("ℹ️ Отправь JSON-файл экспорта истории чата (из Telegram Desktop).")
 
+# ============================ ЛИЧНЫЕ СООБЩЕНИЯ (ТОЛЬКО СОЗДАТЕЛЬ) ============================
 async def handle_private_message(message: Message) -> None:
     user = message.from_user
     if not user:
         return
 
-    if user.id == ADMIN_ID:
-        text = (message.text or message.caption or "").strip()
-        low = text.lower()
-
-        fwd_dt = None
-        if message.forward_date:
-            fwd_dt = message.forward_date.astimezone(TZ)
-        elif getattr(message, "forward_origin", None) and hasattr(message.forward_origin, "date"):
-            fwd_dt = message.forward_origin.date.astimezone(TZ)
-
-        if text and (fwd_dt or parse_report(text)):
-            rep = parse_report(text)
-            if rep:
-                dt = fwd_dt or (message.date.astimezone(TZ) if message.date else now())
-                fwd_from = getattr(message, "forward_from", None)
-                fwd_user_id = fwd_from.id if fwd_from else None
-                fwd_name = getattr(message, "forward_sender_name", "") or (fwd_from.full_name if fwd_from else "")
-                store = store_name(fwd_name, fwd_user_id, text)
-                
-                win = classify_window(dt)
-                recorded = record_report(store, win, dt, rep)
-                save_state()
-                if recorded:
-                    await message.reply(f"✅ Пересланный отчёт добавлен в базу!\nМагазин: <b>{escape(store)}</b>\nОкно: <b>{win}</b> ({dt.strftime('%d.%m %H:%M')})", parse_mode="HTML")
-                else:
-                    await message.reply(f"ℹ️ Отчёт для {escape(store)} ({win}) за {dt.strftime('%d.%m %H:%M')} пропущен (уже есть данные).", parse_mode="HTML")
-                return
-
-        if low.startswith("/say "):
-            cid = get_chat_id()
-            if not cid:
-                await message.reply("❌ Не могу отправить: ID рабочего чата не задан.")
-                return
-            if is_after_hard_mute():
-                await message.reply("❌ Отправка заблокирована правилом 19:00 (жёсткий мут).")
-                return
-                
-            msg_to_send = text.replace("/say ", "", 1)
-            sent = await send_chat_message(cid, msg_to_send)
-            await message.reply("✅ Отправлено в рабочий чат." if sent else "❌ Не удалось отправить сообщение.")
-            return
-
-        if low.startswith("/pm "):
-            try:
-                parts = text.split(" ", 2)
-                target_id = int(parts[1])
-                msg_to_send = parts[2]
-                await bot.send_message(target_id, f"👤 <b>Сообщение от Руководителя:</b>\n\n{msg_to_send}", parse_mode="HTML")
-                await message.reply(f"✅ Ответ успешно отправлен магазину (ID: {target_id}).")
-            except Exception:
-                await message.reply("❌ Ошибка формата или отправки. Используй: /pm ID текст")
-            return
-
-        await bot.send_message(ADMIN_ID, admin_panel_text(), parse_mode="HTML", reply_markup=admin_main_keyboard())
+    # Только создатель имеет доступ к боту в ЛС
+    if user.id != ADMIN_ID:
+        await message.reply(pick_bag("bot_mention_employee", SITUATIONS["bot_mention_employee"]))
         return
 
-    now_ts = time.time()
-    last_reply = RT.pm_last_reply.get(user.id, 0)
-    if now_ts - last_reply < 5.0:
-        return
-    RT.pm_last_reply[user.id] = now_ts
+    # --- Создатель ---
+    text = (message.text or message.caption or "").strip()
+    low = text.lower()
 
-    if is_manager(user.full_name or "", user.id):
-        await message.reply(pick_bag("bot_mention_manager", SITUATIONS["bot_mention_manager"]))
-        return
+    # Пересланный отчёт
+    fwd_dt = None
+    if message.forward_date:
+        fwd_dt = message.forward_date.astimezone(TZ)
+    elif getattr(message, "forward_origin", None) and hasattr(message.forward_origin, "date"):
+        fwd_dt = message.forward_origin.date.astimezone(TZ)
 
-    if user.id in STORE_BY_USER_ID:
-        pending_pushes = STATE.get("pending_report_push", {})
-        if user.id in pending_pushes and time.time() - pending_pushes[user.id] < 7200:
-            store_name_val = STORE_BY_USER_ID[user.id]
-            msg_text = message.text or message.caption or ""
-            
-            await bot.send_message(
-                ADMIN_ID,
-                f"📨 <b>Ответ на пуш от {store_name_val} (ID: <code>{user.id}</code>):</b>\n\n{escape(msg_text)}\n\n<i>Для ответа используй команду:</i>\n<code>/pm {user.id} твой текст</code>",
-                parse_mode="HTML"
-            )
-            
-            universal_replies = [
-                "🫡 Принял информацию! Ждем отчет в рабочем чате.",
-                "⏳ Понял. Как появится возможность - ждем цифры в группе!",
-                "Информацию зафиксировал. Не забудьте продублировать отчет в общий чат! 📊",
-                "Принято! Главное - не забудьте отправить итоговые цифры в рабочую группу. 🎯"
-            ]
-            await message.reply(random.choice(universal_replies))
-            
-            STATE["pending_report_push"].pop(user.id)
+    if text and (fwd_dt or parse_report(text)):
+        rep = parse_report(text)
+        if rep:
+            dt = fwd_dt or (message.date.astimezone(TZ) if message.date else now())
+            fwd_from = getattr(message, "forward_from", None)
+            fwd_user_id = fwd_from.id if fwd_from else None
+            fwd_name = getattr(message, "forward_sender_name", "") or (fwd_from.full_name if fwd_from else "")
+            store = store_name(fwd_name, fwd_user_id, text)
+            win = classify_window(dt)
+            recorded = record_report(store, win, dt, rep)
             save_state()
+            if recorded:
+                await message.reply(
+                    f"✅ Пересланный отчёт добавлен!\nМагазин: <b>{escape(store)}</b>\nОкно: <b>{win}</b> ({dt.strftime('%d.%m %H:%M')})",
+                    parse_mode="HTML"
+                )
+            else:
+                await message.reply(
+                    f"ℹ️ Отчёт для {escape(store)} ({win}) за {dt.strftime('%d.%m %H:%M')} пропущен (уже есть).",
+                    parse_mode="HTML"
+                )
             return
 
-    await message.reply(pick_bag("bot_mention_employee", SITUATIONS["bot_mention_employee"]))
+    # /say — отправить в чат от имени бота
+    if low.startswith("/say "):
+        cid = get_chat_id()
+        if not cid:
+            await message.reply("❌ ID рабочего чата не задан.")
+            return
+        if is_after_hard_mute():
+            await message.reply("❌ Заблокировано: после 19:00 действует жёсткий мут.")
+            return
+        msg_to_send = text[5:].strip()
+        if not msg_to_send:
+            await message.reply("❌ Укажи текст после /say")
+            return
+        sent = await send_chat_message(cid, msg_to_send)
+        await message.reply("✅ Отправлено в рабочий чат." if sent else "❌ Не удалось отправить.")
+        return
+
+    # Всё остальное — открываем панель управления
+    await bot.send_message(ADMIN_ID, admin_panel_text(), parse_mode="HTML", reply_markup=admin_main_keyboard())
 
 # ============================ CALLBACKS СОЗДАТЕЛЯ ============================
 @dp.callback_query()
@@ -1824,7 +1656,6 @@ async def on_callback_query(callback: CallbackQuery) -> None:
     if not callback.from_user or callback.from_user.id != ADMIN_ID:
         await callback.answer("Нет доступа.", show_alert=True)
         return
-        
     n = now()
     try:
         if data == "menu:main":
@@ -1848,22 +1679,14 @@ async def on_callback_query(callback: CallbackQuery) -> None:
             target_mode = data.split(":", 1)[1]
             if target_mode in ("active", "no_jokes", "silent", "stop"):
                 STATE["bot_mode"] = target_mode
-                if target_mode == "stop":
-                    STATE["full_stop"] = True
-                    RT.is_suspended = True
-                else:
-                    STATE["full_stop"] = False
-                    RT.is_suspended = False
+                STATE["full_stop"] = (target_mode == "stop")
+                RT.is_suspended = (target_mode == "stop")
+                if target_mode != "stop":
                     RT.resumed_ts = time.time()
                 save_state()
-                
-                labels = {
-                    "active": "Полная активность",
-                    "no_jokes": "Без шуток",
-                    "silent": "Без сообщений",
-                    "stop": "Полный стоп"
-                }
-                note_msg = f"Режим переключён на '{labels.get(target_mode, target_mode)}'!"
+                labels = {"active": "Полная активность", "no_jokes": "Без шуток",
+                          "silent": "Без сообщений", "stop": "Полный стоп"}
+                note_msg = f"Режим переключён: «{labels.get(target_mode, target_mode)}»"
                 await send_fresh_menu(callback, admin_panel_text(note_msg), admin_modes_keyboard())
                 await callback.answer(labels.get(target_mode, target_mode))
                 return
@@ -1873,7 +1696,8 @@ async def on_callback_query(callback: CallbackQuery) -> None:
             STATE["full_stop"] = False
             force_resume(n)
             await callback.message.edit_reply_markup(reply_markup=None)
-            await bot.send_message(ADMIN_ID, "🚀 <b>Бот запущен в работу по графику.</b>", parse_mode="HTML", reply_markup=admin_main_keyboard())
+            await bot.send_message(ADMIN_ID, "🚀 <b>Бот запущен в работу.</b>", parse_mode="HTML",
+                                   reply_markup=admin_main_keyboard())
             await callback.answer("Запущен")
             return
         if data == "hist:pause":
@@ -1882,15 +1706,15 @@ async def on_callback_query(callback: CallbackQuery) -> None:
             RT.is_suspended = True
             save_state()
             await callback.message.edit_reply_markup(reply_markup=None)
-            await bot.send_message(ADMIN_ID, "⏸ <b>Бот оставлен на паузе.</b> Реплики отправляться не будут.", parse_mode="HTML", reply_markup=admin_main_keyboard())
+            await bot.send_message(ADMIN_ID, "⏸ <b>Бот оставлен на паузе.</b>", parse_mode="HTML",
+                                   reply_markup=admin_main_keyboard())
             await callback.answer("На паузе")
             return
 
         if data == "panel:queue":
-            await send_fresh_menu(callback, admin_panel_text("👀 Очередь обновлена:"), admin_jokes_keyboard())
+            await send_fresh_menu(callback, admin_panel_text("👀 Шутка в очереди:"), admin_jokes_keyboard())
             await callback.answer()
             return
-            
         if data == "panel:change":
             replacement = replace_queued_joke(n)
             if replacement is None:
@@ -1899,13 +1723,12 @@ async def on_callback_query(callback: CallbackQuery) -> None:
             await send_fresh_menu(callback, admin_panel_text("🔄 Шутка заменена:"), admin_jokes_keyboard())
             await callback.answer("Заменено")
             return
-            
         if data == "panel:force":
             if is_after_hard_mute():
-                await callback.answer("❌ Заблокировано: после 19:00 действует жёсткий мут.", show_alert=True)
+                await callback.answer("❌ После 19:00 жёсткий мут.", show_alert=True)
                 return
             if get_bot_mode() in ("stop", "silent"):
-                await callback.answer("❌ В текущем режиме сообщения в чат заблокированы.", show_alert=True)
+                await callback.answer("❌ В текущем режиме отправка заблокирована.", show_alert=True)
                 return
             if jokes_temporarily_paused():
                 until = datetime.fromtimestamp(RT.jokes_paused_until, TZ).strftime("%H:%M")
@@ -1918,71 +1741,66 @@ async def on_callback_query(callback: CallbackQuery) -> None:
             joke = queued_joke_for(n)
             sent = await send_chat_message(cid, joke)
             if not sent:
-                await callback.answer("Не удалось отправить шутку в рабочий чат.", show_alert=True)
+                await callback.answer("Не удалось отправить шутку.", show_alert=True)
                 return
             mark_joke_used(joke)
             STATE["queued_joke"] = None
             save_state()
-            await send_fresh_menu(callback, admin_panel_text("✅ Шутка отправлена в рабочий чат!"), admin_jokes_keyboard())
-            await callback.answer("Отправлено в чат!")
+            await send_fresh_menu(callback, admin_panel_text("✅ Шутка отправлена в чат!"), admin_jokes_keyboard())
+            await callback.answer("Отправлено!")
             return
 
         if data == "admin:vibe":
             fans = STATE.setdefault("fans", {})
             top_fans = sorted(fans.items(), key=lambda x: -x[1])[:3]
-            fans_text = "\n".join(f"👤 {escape(n)} - {c} лайков" for n, c in top_fans) if top_fans else "Пока нет данных"
-            
+            fans_text = "\n".join(f"👤 {escape(n)} - {c} лайков" for n, c in top_fans) if top_fans else "Нет данных"
             jokes = _jokes_used()
             top_jokes = sorted([j for j in jokes if j.get("likes", 0) > 0], key=lambda x: -x.get("likes", 0))[:3]
-            jokes_text = "\n\n".join(f"💬 «{escape(j.get('t', j.get('n', ''))[:60])}...»\n❤️ Лайков: {j.get('likes')}" for j in top_jokes) if top_jokes else "Пока нет данных"
-            
-            msg = f"📊 <b>Аналитика вайба</b>\n\n🏆 <b>Топ-3 фаната бота:</b>\n{fans_text}\n\n🎭 <b>Топ шуток (из недавних):</b>\n{jokes_text}"
-            await send_fresh_menu(callback, msg, InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="🔙 Назад", callback_data="menu:reports")]]))
+            jokes_text = "\n\n".join(
+                f"💬 «{escape(j.get('t', j.get('n', ''))[:60])}...»\n❤️ Лайков: {j.get('likes')}"
+                for j in top_jokes
+            ) if top_jokes else "Нет данных"
+            msg = f"📊 <b>Аналитика вайба</b>\n\n🏆 <b>Топ-3 фаната:</b>\n{fans_text}\n\n🎭 <b>Топ шуток:</b>\n{jokes_text}"
+            await send_fresh_menu(callback, msg, InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔙 Назад", callback_data="menu:reports")]
+            ]))
             await callback.answer()
             return
 
         if data == "admin:push":
             bd = biz_date(n).isoformat()
             win = classify_window(n)
+            total_count = count_reports_today(bd, win)
+            if total_count >= TOTAL_STORES:
+                await callback.answer("Квота закрыта! Все отчёты получены.", show_alert=True)
+                return
             reported = set(day_entries(bd, win))
-            
-            if len(reported) >= 16:
-                await callback.answer("Квота 16 отчетов закрыта! Должников нет.", show_alert=True)
-                return
-                
-            expected = expected_stores(win, bd)
-            miss = sorted(expected - reported)
-            
+            miss = sorted(set(STORE_NAMES) - reported)
             if not miss:
-                await callback.answer("Все отчеты сданы! Должников нет.", show_alert=True)
+                await callback.answer("Все идентифицированные отчёты сданы!", show_alert=True)
                 return
-                
             kb = []
             for m in miss:
-                safe_name = m[:30]
-                kb.append([InlineKeyboardButton(text=m, callback_data=f"push:{safe_name}")])
+                kb.append([InlineKeyboardButton(text=m, callback_data=f"push:{m[:30]}")])
             kb.append([InlineKeyboardButton(text="🔙 Назад", callback_data="menu:reports")])
-            await send_fresh_menu(callback, "🎯 Выберите должника для пуша (по текущему периоду):", InlineKeyboardMarkup(inline_keyboard=kb))
+            await send_fresh_menu(callback, f"🎯 Пуш в ЛС (текущее окно: {win}):", InlineKeyboardMarkup(inline_keyboard=kb))
             await callback.answer()
             return
-            
+
         if data.startswith("push:"):
             push_store = data.split(":", 1)[1]
-            
             target_id = USER_ID_BY_STORE.get(push_store)
             if not target_id:
-                await callback.answer("❌ ID магазина не найден в базе.", show_alert=True)
+                await callback.answer("❌ ID магазина не найден.", show_alert=True)
                 return
-                
             try:
                 await bot.send_message(target_id, "⏳ Напоминаю: время сдавать отчёт. Жду цифры в общем чате!")
                 STATE.setdefault("pending_report_push", {})[target_id] = time.time()
                 save_state()
-                
-                await send_fresh_menu(callback, f"✅ Пуш отправлен в ЛС магазину {escape(push_store)}!", admin_reports_keyboard())
+                await send_fresh_menu(callback, f"✅ Пуш отправлен в ЛС: {escape(push_store)}!", admin_reports_keyboard())
                 await callback.answer("Отправлено в ЛС")
             except Exception:
-                await callback.answer("❌ Ошибка! Бот заблокирован магазином в ЛС.", show_alert=True)
+                await callback.answer("❌ Ошибка: бот заблокирован магазином.", show_alert=True)
             return
 
         if data == "admin:stats":
@@ -2001,10 +1819,10 @@ async def on_callback_query(callback: CallbackQuery) -> None:
                     today_valid[s] = best_rep
                 else:
                     today_missed.append(s)
-            
+
             top_today_fact = sorted(today_valid.items(), key=lambda x: -x[1]["fact"])[:3]
-            top_today_pct = sorted(today_valid.items(), key=lambda x: -x[1]["pct"])[:3]
-            
+            top_today_pct  = sorted(today_valid.items(), key=lambda x: -x[1]["pct"])[:3]
+
             weekly_stats = {s: {"fact": 0, "plan": 0, "missed": 0} for s in STORE_NAMES}
             for d in week_dates:
                 day_data = STATE["history"].get(d, {})
@@ -2017,7 +1835,6 @@ async def on_callback_query(callback: CallbackQuery) -> None:
                             weekly_stats[s]["plan"] += best_rep["plan"]
                     else:
                         weekly_stats[s]["missed"] += 1
-            
             for s in STORE_NAMES:
                 if weekly_stats[s]["plan"] > 0:
                     weekly_stats[s]["pct"] = (weekly_stats[s]["fact"] / weekly_stats[s]["plan"]) * 100
@@ -2025,43 +1842,35 @@ async def on_callback_query(callback: CallbackQuery) -> None:
                     weekly_stats[s]["pct"] = 0
 
             top_week_fact = sorted([item for item in weekly_stats.items() if item[1]["fact"] > 0], key=lambda x: -x[1]["fact"])[:3]
-            top_week_pct = sorted([item for item in weekly_stats.items() if item[1]["pct"] > 0], key=lambda x: -x[1]["pct"])[:3]
-            week_missed = [f"{s} ({st['missed']} шт.)" for s, st in weekly_stats.items() if st["missed"] > 0]
+            top_week_pct  = sorted([item for item in weekly_stats.items() if item[1]["pct"] > 0], key=lambda x: -x[1]["pct"])[:3]
+            week_missed   = [f"{s} ({st['missed']} шт.)" for s, st in weekly_stats.items() if st["missed"] > 0]
 
             medals = ["🥇", "🥈", "🥉"]
             lines = [f"📊 <b>Статистика за сегодня ({today.strftime('%d.%m')}):</b>", "<b>По сумме:</b>"]
             for i, (s, rep) in enumerate(top_today_fact):
                 lines.append(f"{medals[i]} {escape(s)} - {rep['fact']} грн ({pct_str(rep['pct'])})")
-            
             if not top_today_fact:
                 lines.append("<i>Нет данных</i>")
-                
             lines.append("<b>По выполнению:</b>")
             for i, (s, rep) in enumerate(top_today_pct):
                 lines.append(f"{medals[i]} {escape(s)} - {pct_str(rep['pct'])}")
-                
             if not top_today_pct:
                 lines.append("<i>Нет данных</i>")
-                
             if today_missed:
-                lines.append(f"⚠️ <i>Нет отчетов сегодня:</i> {escape(', '.join(today_missed))}")
+                lines.append(f"⚠️ <i>Нет отчётов сегодня:</i> {escape(', '.join(today_missed))}")
             else:
-                lines.append("✅ <i>Все сдали отчеты сегодня!</i>")
+                lines.append("✅ <i>Все сдали отчёты сегодня!</i>")
 
-            lines.extend(["", f"🏆 <b>Текущая неделя (с {start_date.strftime('%d.%m')} по {today.strftime('%d.%m')}):</b>", "<b>По сумме:</b>"])
+            lines.extend(["", f"🏆 <b>Неделя (с {start_date.strftime('%d.%m')} по {today.strftime('%d.%m')}):</b>", "<b>По сумме:</b>"])
             for i, (s, rep) in enumerate(top_week_fact):
                 lines.append(f"{medals[i]} {escape(s)} - {rep['fact']} грн ({pct_str(rep['pct'])})")
-                
             if not top_week_fact:
                 lines.append("<i>Нет данных</i>")
-                
             lines.append("<b>По выполнению:</b>")
             for i, (s, rep) in enumerate(top_week_pct):
                 lines.append(f"{medals[i]} {escape(s)} - {pct_str(rep['pct'])}")
-                
             if not top_week_pct:
                 lines.append("<i>Нет данных</i>")
-                
             if week_missed:
                 lines.append(f"❌ <i>Пропуски за неделю:</i> {escape(', '.join(week_missed))}")
 
@@ -2071,73 +1880,72 @@ async def on_callback_query(callback: CallbackQuery) -> None:
 
             kb = InlineKeyboardMarkup(inline_keyboard=[
                 [InlineKeyboardButton(text="📢 Опубликовать в общий чат", callback_data="pub:stats_complex")],
-                [InlineKeyboardButton(text="🔙 Назад", callback_data="menu:reports")]
+                [InlineKeyboardButton(text="🔙 Назад", callback_data="menu:reports")],
             ])
-            
             await send_fresh_menu(callback, report_text, kb)
             await callback.answer()
             return
-            
+
         if data == "pub:stats_complex":
             if is_after_hard_mute() or get_bot_mode() in ("stop", "silent") or not can_speak(n, gap=False, ignore_mute=True):
                 await callback.answer("❌ Публикация заблокирована (режим тишины).", show_alert=True)
                 return
-            
             text_to_send = STATE.get("queued_stats")
             if not text_to_send:
-                await callback.answer("❌ Нет сохраненного отчета.", show_alert=True)
+                await callback.answer("❌ Нет сохранённого отчёта.", show_alert=True)
                 return
-                
             cid = get_chat_id()
             if not cid:
                 await callback.answer("❌ Не задан ID чата.", show_alert=True)
                 return
-                
             sent = await send_chat_message(cid, text_to_send, parse_mode="HTML")
             if sent:
                 await callback.answer("✅ Улетело в чат!")
                 await send_fresh_menu(callback, admin_panel_text("✅ Опубликовано в рабочий чат!"), admin_reports_keyboard())
             else:
-                await callback.answer("❌ Ошибка отправки в чат.", show_alert=True)
+                await callback.answer("❌ Ошибка отправки.", show_alert=True)
             return
 
         if data == "admin:missing":
             if RT.resumed_ts and time.time() - RT.resumed_ts < 120:
                 secs_left = int(120 - (time.time() - RT.resumed_ts))
                 await callback.answer(
-                    f"⏳ Подожди ещё {secs_left} сек - бот дообрабатывает входящие сообщения. Данные пока неполные.",
+                    f"⏳ Подожди ещё {secs_left} сек — бот дообрабатывает очередь.",
                     show_alert=True
                 )
                 return
             bd = biz_date(n).isoformat()
             lines = [f"📋 <b>Не сдали отчёты за {bd}:</b>"]
             for win, title in (("morning", "Утро"), ("midday", "Обед"), ("evening", "Вечер")):
+                total_count = count_reports_today(bd, win)
                 reported = set(day_entries(bd, win))
-                if len(reported) >= 16:
-                    lines.append(f"<b>{title} ({len(reported)}/16):</b> все сдали (квота закрыта)")
+                if total_count >= TOTAL_STORES:
+                    lines.append(f"<b>{title} ({total_count}/{TOTAL_STORES}):</b> все сдали ✅")
                 else:
-                    missing = sorted(expected_stores(win, bd) - reported)
-                    lines.append(f"<b>{title} ({len(reported)}/{len(expected_stores(win, bd))}):</b> " + (", ".join(missing) if missing else "все сдали"))
+                    missing = sorted(set(STORE_NAMES) - reported)
+                    lines.append(
+                        f"<b>{title} ({total_count}/{TOTAL_STORES}):</b> "
+                        + (", ".join(missing) if missing else "все идентифицированные сдали")
+                    )
             await send_fresh_menu(callback, "\n".join(lines), admin_reports_keyboard())
             await callback.answer()
             return
-            
+
         if data == "admin:grace_info":
             if RT.resumed_ts and time.time() - RT.resumed_ts < 120:
                 secs_left = int(120 - (time.time() - RT.resumed_ts))
                 await callback.answer(
-                    f"⏳ Бот дообрабатывает входящие сообщения из очереди Telegram.\n"
-                    f"Кнопки должников станут активны через ~{secs_left} сек.",
+                    f"⏳ Бот дообрабатывает очередь Telegram.\nКнопки разблокируются через ~{secs_left} сек.",
                     show_alert=True
                 )
             else:
-                await send_fresh_menu(callback, admin_panel_text("✅ Данные актуальны, кнопки разблокированы."), admin_reports_keyboard())
-                await callback.answer("✅ Данные актуальны, кнопки разблокированы.")
+                await send_fresh_menu(callback, admin_panel_text("✅ Данные актуальны."), admin_reports_keyboard())
+                await callback.answer("✅ Готово")
             return
 
         if data == "admin:state":
             state_str = json.dumps(STATE, ensure_ascii=False, indent=2)
-            file = BufferedInputFile(state_str.encode('utf-8'), filename="state.json")
+            file = BufferedInputFile(state_str.encode("utf-8"), filename="state.json")
             await callback.message.reply_document(file, caption="Актуальный state.json")
             await callback.answer()
             return
@@ -2175,24 +1983,25 @@ async def on_callback_query(callback: CallbackQuery) -> None:
         except:
             pass
 
-# ============================ ГЛАВНЫЙ ОБРАБОТЧИК (ЧАТЫ) ============================
+# ============================ ГЛАВНЫЙ ОБРАБОТЧИК (ГРУППА) ============================
 async def process(message: Message, edited: bool) -> None:
     mode = get_bot_mode()
     if mode == "stop":
         return
-        
     chat = message.chat
     if chat.type not in ("group", "supergroup"):
         return
     user = message.from_user
     if user is None or user.is_bot:
         return
+
     head = (message.text or "").strip().lower()
     if head.startswith("/") and not edited:
         c = head.split()[0].split("@")[0]
         if c in ("/status", "/id", "/test"):
             await diag(message, c)
             return
+
     if not env_chat_ids() and STATE.get("chat_id") is None:
         STATE["chat_id"] = chat.id
         save_state()
@@ -2212,6 +2021,7 @@ async def process(message: Message, edited: bool) -> None:
         has_bot_mention = True
     directed_to_bot = (is_bot_reply or has_bot_mention)
 
+    # Разбор отчёта
     if text:
         rep = parse_report(text)
         if rep:
@@ -2221,17 +2031,20 @@ async def process(message: Message, edited: bool) -> None:
                 window = classify_window(dt)
                 record_report(store, window, dt, rep)
                 save_state()
-                age_seconds = max(0.0, (wall_now() - dt).total_seconds())
-                if age_seconds <= 600 and mode != "stop" and not RT.is_suspended:
+                if mode != "stop" and not RT.is_suspended:
                     if not edited:
                         await handle_report(message, store, window, rep, dt)
                     elif not is_manager(name, user.id) and user.id != ADMIN_ID:
                         await react(message, ["👀"])
                 return
 
-    if message.date and (wall_now() - message.date.astimezone(TZ)).total_seconds() > 600:
+    # Создатель в общем чате — только реакции, никаких ответов
+    if user.id == ADMIN_ID:
+        if is_manager(name, user.id):
+            await react(message, MANAGER_REACTIONS)
         return
 
+    # Руководитель
     if is_manager(name, user.id):
         await react(message, MANAGER_REACTIONS)
         if not edited:
@@ -2302,10 +2115,8 @@ async def process(message: Message, edited: bool) -> None:
             if now_ts < getattr(RT, "ignore_mentions_until", 0.0):
                 await react(message, ["🤫", "⏳", "👀"])
                 return
-
             RT.group_mentions = [ts for ts in getattr(RT, "group_mentions", []) if now_ts - ts < 600]
             RT.group_mentions.append(now_ts)
-
             if len(RT.group_mentions) >= 3:
                 await say(pick_bag("bot_mention_manager", SITUATIONS["bot_mention_manager"]), message, track_deletable=True, msg_type="joke")
                 RT.ignore_mentions_until = now_ts + 600
@@ -2341,63 +2152,63 @@ async def on_edited(message: Message):
     except Exception:
         log.exception("Ошибка обработки правки")
 
+# ============================ ПЛАНИРОВЩИК ============================
 async def run_slot(kind: str, fallback: bool, n: datetime) -> str:
     mode = get_bot_mode()
     if mode in ("stop", "silent"):
         return "skip"
-
     jokes_kind = kind == "joke" or fallback
     critical_reminder = kind in ("nudge_morning", "nudge_midday")
-
     if jokes_kind and mode == "no_jokes":
         return "skip"
-
     if not can_speak(n, jokes=False, ignore_mute=critical_reminder):
         return "retry"
 
     text, html = None, False
     msg_type = "text"
     track_del = False
-    
+
     if kind == "greeting":
         text = greeting_text(n)
-        
+
     elif kind in ("nudge_morning", "nudge_midday"):
+        # grace period после активации
         if RT.resumed_ts and time.time() - RT.resumed_ts < 120:
-            log.info("nudge_%s пропускаем: %d сек после активации (grace period 120 сек)",
-                     kind, int(time.time() - RT.resumed_ts))
+            log.info("nudge пропускаем: grace period %d сек", int(time.time() - RT.resumed_ts))
             return "retry"
         window = "morning" if kind == "nudge_morning" else "midday"
         today = biz_date(n).isoformat()
-        reported = set(day_entries(today, window))
-        
-        if len(reported) >= 16:
-            all_reports = day_entries(today, window)
-            unidentified = [s for s in all_reports if s not in STORE_NAMES]
-            msg = (f"📊 <b>Сводка (окно {window})</b>\n"
-                   f"Собрано отчетов: {len(all_reports)}/16\n"
-                   f"Статус: ✅ Квота 16 отчетов закрыта, пуш отменен\n"
-                   f"Не идентифицированы ({len(unidentified)} шт): {', '.join(unidentified)}")
+        total_count = count_reports_today(today, window)
+
+        # Если уже получено TOTAL_STORES или больше отчётов — не напоминаем
+        if total_count >= TOTAL_STORES:
+            log.info("nudge_%s пропускаем: %d/%d отчётов получено", window, total_count, TOTAL_STORES)
             try:
-                await bot.send_message(ADMIN_ID, msg, parse_mode="HTML")
+                await bot.send_message(
+                    ADMIN_ID,
+                    f"📊 <b>Окно {window}:</b> {total_count}/{TOTAL_STORES} отчётов получено — напоминание не нужно ✅",
+                    parse_mode="HTML"
+                )
             except Exception:
                 pass
             return "skip"
 
-        expected = expected_stores(window, today)
-        miss = sorted(expected - reported)
-        
+        reported = set(day_entries(today, window))
+        miss = sorted(set(STORE_NAMES) - reported)
         if not miss:
+            # Все идентифицированные сдали, но сумарно меньше 16
+            log.info("nudge_%s: все идентифицированные сдали (%d/%d), пропускаем", window, total_count, TOTAL_STORES)
             return "skip"
-            
-        all_reports = day_entries(today, window)
-        unidentified = [s for s in all_reports if s not in STORE_NAMES]
-        msg = (f"📊 <b>Сводка (окно {window})</b>\n"
-               f"Собрано отчетов: {len(all_reports)}/16\n"
-               f"Статус: ⚠️ Отправлено напоминание в группу\n"
-               f"Не идентифицированы ({len(unidentified)} шт): {', '.join(unidentified)}")
+
+        # Уведомить создателя
         try:
-            await bot.send_message(ADMIN_ID, msg, parse_mode="HTML")
+            await bot.send_message(
+                ADMIN_ID,
+                f"📊 <b>Окно {window}:</b> {total_count}/{TOTAL_STORES} отчётов.\n"
+                f"Не идентифицированы или не сдали: {', '.join(miss[:8])}{'...' if len(miss) > 8 else ''}\n"
+                f"Отправлено напоминание в группу.",
+                parse_mode="HTML"
+            )
         except Exception:
             pass
 
@@ -2407,7 +2218,7 @@ async def run_slot(kind: str, fallback: bool, n: datetime) -> str:
         text = f"{label_cap} ещё ждём от: {shown}{more}. Коллеги, пожалуйста, не забываем 🙏"
         msg_type = "reminder"
         track_del = True
-        
+
     if text is None and jokes_kind:
         if jokes_temporarily_paused():
             return "retry"
@@ -2415,12 +2226,10 @@ async def run_slot(kind: str, fallback: bool, n: datetime) -> str:
         html = False
         msg_type = "joke"
         track_del = True
-        
+
     if text is None:
         return "skip"
-    if jokes_kind and text and not can_speak(n, jokes=True):
-        return "skip"
-        
+
     ok = await say(text, html=html, track_deletable=track_del, msg_type=msg_type)
     if ok and msg_type == "joke":
         mark_joke_used(text)
@@ -2432,11 +2241,11 @@ async def tick() -> None:
     n = now()
     if not get_chat_id():
         return
-
     today = n.date().isoformat()
     done = STATE["done"].setdefault(today, [])
     for old in sorted(STATE["done"])[:-3]:
         STATE["done"].pop(old, None)
+
     for slot_id, h, m, kind, fallback in SLOTS:
         if slot_id in done:
             continue
@@ -2445,7 +2254,8 @@ async def tick() -> None:
             continue
 
         if kind == "joke":
-            if n >= min(start + timedelta(minutes=JOKE_MAX_DELAY_MIN), joke_window_end(start)):
+            window_end = joke_window_end(start)
+            if n >= window_end:
                 done.append(slot_id)
                 continue
             if jokes_temporarily_paused():
@@ -2476,7 +2286,7 @@ async def scheduler_loop() -> None:
             log.exception("Ошибка планировщика")
         await asyncio.sleep(20)
 
-# ============================ ВЕБ-СЕРВЕР ДЛЯ ХОСТИНГА ============================
+# ============================ ВЕБ-СЕРВЕР ============================
 async def handle_ping(request):
     return web.Response(text="OK, bot is alive")
 
@@ -2488,6 +2298,7 @@ async def start_keepalive_server() -> None:
     port = int(os.environ.get("PORT", 10000))
     await web.TCPSite(runner, "0.0.0.0", port).start()
 
+# ============================ СТАРТ ============================
 async def main() -> None:
     load_state()
     RT.startup_ts = time.time()
@@ -2500,48 +2311,48 @@ async def main() -> None:
         RT.bot_name_norm = _norm_name(me.full_name)
     except Exception as e:
         log.warning("get_me не удался: %s", e)
-    asyncio.create_task(scheduler_loop())
-    log.info("Бот запущен. Время в Одессе: %s", now().strftime("%Y-%m-%d %H:%M"))
 
-    restored = await restore_state_from_telegram()
+    asyncio.create_task(scheduler_loop())
+    log.info("Бот запущен. Время: %s", now().strftime("%Y-%m-%d %H:%M"))
 
     n = now()
     history_days = len(STATE.get("history", {}))
-    today_reports = sum(
-        1 for s in STATE["history"].get(n.date().isoformat(), {}).values()
-        if any(w in s for w in ("morning", "midday", "evening"))
+    today_str = n.date().isoformat()
+    today_total = sum(
+        1 for s_data in STATE["history"].get(today_str, {}).values()
+        if any(w in s_data for w in ("morning", "midday", "evening"))
     )
 
-    if restored and history_days > 0:
-        if today_reports > 0:
-            restart_msg = (
-                f"🔄 <b>Перезапустился и восстановил данные из бэкапа!</b>\n\n"
-                f"📦 История: {history_days} дн. | Отчётов за сегодня: {today_reports}\n\n"
-                f"⚠️ Для полной синхронизации за сегодня скинь свежий <b>result.json</b> "
-                f"(экспорт из Telegram Desktop за {n.strftime('%d.%m')}) или перешли сообщения с отчётами в ЛС.\n"
-                f"<i>Или нажми «Запустить» - буду работать с тем что есть.</i>"
-            )
-        else:
-            restart_msg = (
-                f"🔄 <b>Перезапустился, бэкап восстановлен (история {history_days} дн.)</b>\n\n"
-                f"📭 Отчётов за сегодня ({n.strftime('%d.%m')}) в бэкапе нет.\n\n"
-                f"Скинь <b>result.json</b> со свежим экспортом чата за сегодня или просто перешли отчёты мне в ЛС - "
-                f"тогда я узнаю кто уже сдал и не буду слать лишние пуши.\n"
-                f"<i>Или нажми «Запустить» - подожду 2 мин и сам разберусь.</i>"
-            )
+    # Сообщение о перезапуске — одно, без вариантов
+    if history_days > 0 and today_total > 0:
+        restart_msg = (
+            f"🔄 <b>Перезапустился.</b>\n\n"
+            f"📦 История: {history_days} дн. | Отчётов за сегодня ({n.strftime('%d.%m')}): {today_total}\n\n"
+            f"Скинь свежий <b>result.json</b> (или любой .json экспорт чата) чтобы я всё актуализировал.\n"
+            f"<i>Или нажми «Запустить» — работаю с тем что есть.</i>"
+        )
+    elif history_days > 0:
+        restart_msg = (
+            f"🔄 <b>Перезапустился.</b> История ({history_days} дн.) есть, но отчётов за сегодня ({n.strftime('%d.%m')}) нет.\n\n"
+            f"Скинь <b>result.json</b> или перешли отчёты мне в ЛС.\n"
+            f"<i>Или нажми «Запустить» без файла.</i>"
+        )
     else:
         restart_msg = (
-            f"🔄 <b>Я только что перезапустился!</b> Память чистая.\n\n"
-            f"📋 Скинь мне <b>result.json</b> или перешли сообщения с отчётами за <b>сегодня ({n.strftime('%d.%m')})</b>, "
-            f"чтобы я знал кто уже сдал отчёты.\n\n"
-            f"<i>Или нажми «Запустить» без файла - подожду 2 мин (pending updates) и начну работу.</i>"
+            f"🔄 <b>Перезапустился.</b> Память пустая.\n\n"
+            f"📋 Скинь <b>result.json</b> (экспорт чата из Telegram Desktop) или перешли отчёты за сегодня ({n.strftime('%d.%m')}).\n"
+            f"<i>Или нажми «Запустить» — подожду 2 мин и начну работу.</i>"
         )
 
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="▶️ Запустить в работу", callback_data="hist:start")],
+        [InlineKeyboardButton(text="⏸ Оставить на паузе",  callback_data="hist:pause")],
+    ])
+
     try:
-        await bot.send_message(ADMIN_ID, restart_msg, parse_mode="HTML",
-                               reply_markup=admin_main_keyboard())
+        await bot.send_message(ADMIN_ID, restart_msg, parse_mode="HTML", reply_markup=keyboard)
     except Exception as e:
-        log.warning("Не удалось отправить уведомление админу о рестарте: %s", e)
+        log.warning("Не удалось отправить уведомление о рестарте: %s", e)
 
     await dp.start_polling(bot, allowed_updates=["message", "edited_message", "message_reaction", "callback_query"])
 
