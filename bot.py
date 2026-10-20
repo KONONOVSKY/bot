@@ -2,7 +2,7 @@
 """
 TOP TEAM - рабочий бот для чата 16 магазинов (Сота Альянс, Одесский регион).
 4 режима работы (Полная активность, Без шуток, Без сообщений, Полный стоп),
-синхронизация через result.json, умный пуш должников в ЛС.
+синхронизация через result.json, умный пуш должников в ЛС, матричный генератор шуток.
 """
 from __future__ import annotations
 
@@ -139,8 +139,9 @@ STATE: dict = {
     "chat_id": None, "history": {}, "bags": {}, "done": {},
     "jokes_used": [], "queued_joke": None, "review_pending": {},
     "tech_reply_date": "", "fans": {},
-    "bot_mode": "active",
-    "queued_stats": None, "pm_push_enabled": True, "pending_report_push": {}
+    "bot_mode": "active", "queued_stats": None, "pm_push_enabled": True, 
+    "pending_report_push": {}, "custom_jokes": [], "suggested_jokes": {},
+    "last_auto_gen_date": ""
 }
 
 class RT:
@@ -441,17 +442,11 @@ def day_entries(bd: str, window: str) -> dict:
     return {s: w[window] for s, w in STATE["history"].get(bd, {}).items() if window in w}
 
 def count_reports_today(bd: str, window: str) -> int:
-    """Считает общее количество отчётов за окно — включая неопознанные магазины."""
     day_data = STATE["history"].get(bd, {})
     count = sum(1 for s_data in day_data.values() if window in s_data)
     return count
 
 def expected_stores_for_reminder(window: str, today: str) -> set:
-    """
-    Возвращает магазины, от которых ожидается отчёт.
-    Логика: все известные магазины (STORE_NAMES).
-    Если суммарное количество отчётов в окне >= TOTAL_STORES — все сдали (нет смысла напоминать).
-    """
     return set(STORE_NAMES)
 
 def pct_str(p) -> str:
@@ -465,7 +460,7 @@ def evening_stats(dates: list) -> dict:
                 res.setdefault(s, []).append((d, e["pct"]))
     return res
 
-# ============================ БАНК ФРАЗ ============================
+# ============================ БАНК ФРАЗ И ГЕНЕРАТОР ============================
 JOKES = {
     "general": [
         "🧮 Продавец - это когда ты гуманитарий, но рассрочку на 10 платежей с учетом допов считаешь в уме быстрее калькулятора.",
@@ -536,6 +531,78 @@ JOKES = {
         "📦 На складе всё есть, кроме именно того товара, который нужен прямо сейчас. Классика жанра.",
     ]
 }
+
+# --- Матричный генератор абсурда ---
+JOKE_SETUPS = [
+    "Когда клиент на {store} просит скидку,",
+    "Артамонов проверяет остатки на {store}, а в это время",
+    "Стелла Яссин заходит на {store}, и тут",
+    "На {store} клиент говорит «я только посмотреть», но",
+    "Пока 1С висит на {store},",
+    "Юлия Марко открывает чек с {store}, а там",
+    "Денис Гусев начинает отрабатывать возражения на {store}, и вдруг",
+    "Когда КРО подключается к камерам на {store},",
+    "На {store} терминал отказывается проводить оплату, потому что",
+    "Клиент приносит телефон по гарантии на {store}, а в итоге",
+    "Бухгалтерия звонит на {store} с вопросом по кассе, и в этот момент",
+    "Когда Роман Анатольевич спрашивает про конверсию на {store},",
+    "Стажёр на {store} впервые остаётся один в зале, и тут",
+    "Клиент просит «самый простой телефон» на {store}, но",
+    "На {store} прилетает перемещение от Артамонова, и сразу же",
+    "Когда банк думает над заявкой на рассрочку на {store},",
+    "На {store} привозят новую партию чехлов, а тем временем",
+    "К концу смены на {store} заходит клиент с пакетом мелочи, и",
+    "Когда принтер на {store} отказывается печатать договор,",
+    "На {store} клиент спрашивает пароль от Wi-Fi, а продавец"
+]
+JOKE_ACTIONS = [
+    "стажёр случайно продаёт витрину",
+    "1С просто выходит из чата",
+    "кассовый аппарат начинает играть победный марш",
+    "клиент сам себе оформляет страховку на год",
+    "кто-то незаметно клеит плёнку на терминал",
+    "принтер печатает ценники на древнегреческом",
+    "покупатель берёт рассрочку на чехол",
+    "АХО приезжает чинить дверь, но покупает роутер",
+    "конкуренты из соседнего магазина приходят за советом",
+    "все смартфоны на витрине одновременно перезагружаются",
+    "кредитный брокер падает в обморок от суммы чека",
+    "продавец телепортируется на склад за нужным цветом",
+    "клиент вспоминает, что у него вообще-то кнопочная Nokia",
+    "стажёр предлагает трейд-ин на кота клиента",
+    "срабатывает сигнализация от переизбытка допов в чеке",
+    "терминал списывает деньги взглядом",
+    "клиент соглашается на перенос контактов с калькулятора",
+    "продавец проводит экзорцизм вирусов",
+    "смартфон сам скачивает нужные приложения от страха",
+    "инкассация приезжает забирать нервы сотрудников"
+]
+JOKE_PUNCHLINES = [
+    "и где-то улыбается Стелла Яссин.",
+    "потому что план сам себя не закроет.",
+    "а Юлия Марко уже готовит заявление на удержание.",
+    "ведь Денис Гусев учил не сдаваться.",
+    "и это мы еще не дошли до аксессуаров.",
+    "потому что в ОФ2 нет слова «невозможно».",
+    "а Боляк просто делает скриншот для истории.",
+    "и Артамонов отменяет перемещение от греха подальше.",
+    "ведь таргет одобряет даже такие безумные заявки.",
+    "и Роман Анатольевич молча ставит лайк.",
+    "потому что без сервиса телефон не продаётся.",
+    "а КРО увеличивает зум на камере.",
+    "ведь главное — уверенный зрительный контакт.",
+    "и где-то грустит один невыполненный KPI.",
+    "потому что магия розницы работает именно так.",
+    "а стажер просто идет пить валерьянку.",
+    "и это только первый час работы.",
+    "потому что клиенты ОФ2 — это отдельный вид искусства.",
+    "ведь рассрочка на 10 платежей лечит любые сомнения.",
+    "и 1С решает уйти в отпуск."
+]
+
+def generate_auto_joke() -> str:
+    store = random.choice(STORE_NAMES)
+    return f"{random.choice(JOKE_SETUPS).format(store=store)} {random.choice(JOKE_ACTIONS)} — {random.choice(JOKE_PUNCHLINES)}"
 
 TECH_REPLIES = [
     "💔 1С опять не отвечает... А ведь когда-то мы с ней работали без посредников. Ладно, наберите айти.",
@@ -933,6 +1000,9 @@ JOKES_USED_MAX = 400
 JOKE_SIMILARITY = 0.85
 JOKE_MIN_LEN = 15
 
+def get_full_joke_bank() -> list:
+    return JOKES["general"] + STATE.get("custom_jokes", [])
+
 def _joke_norm(text: str) -> str:
     return re.sub(r"[\W_]+", " ", (text or "").lower().replace("ё", "е")).strip()
 
@@ -991,7 +1061,7 @@ def sync_jokes_from_history(items: list) -> int:
         return 0
     norms = [nt for _, nt in msgs]
     found = 0
-    for joke in JOKES["general"]:
+    for joke in get_full_joke_bank():
         idx = _find_matches(_joke_norm(joke), norms)
         if idx:
             mark_joke_used(joke, max(msgs[i][0] for i in idx))
@@ -999,13 +1069,13 @@ def sync_jokes_from_history(items: list) -> int:
     return found
 
 def joke_stats() -> tuple:
-    bank = JOKES["general"]
+    bank = get_full_joke_bank()
     used_norms = [e["n"] for e in _jokes_used() if e.get("n")]
     used = sum(1 for j in bank if _find_matches(_joke_norm(j), used_norms, True))
     return used, len(bank)
 
 def joke_for(n: datetime) -> str:
-    bank = JOKES["general"]
+    bank = get_full_joke_bank()
     used = _jokes_used()
     used_norms = [e["n"] for e in used if e.get("n")]
     fresh = [j for j in bank if not _find_matches(_joke_norm(j), used_norms, True)]
@@ -1019,8 +1089,9 @@ def joke_for(n: datetime) -> str:
 
 def queued_joke_for(n: datetime | None = None) -> str:
     current = STATE.get("queued_joke")
+    bank = get_full_joke_bank()
     used_norms = [entry["n"] for entry in _jokes_used() if entry.get("n")]
-    if current and current in JOKES["general"] and not _find_matches(_joke_norm(current), used_norms, True):
+    if current and current in bank and not _find_matches(_joke_norm(current), used_norms, True):
         return current
     chosen = joke_for(n or now())
     STATE["queued_joke"] = chosen
@@ -1030,7 +1101,8 @@ def queued_joke_for(n: datetime | None = None) -> str:
 def replace_queued_joke(n: datetime | None = None) -> str | None:
     current = queued_joke_for(n)
     used_norms = [entry["n"] for entry in _jokes_used() if entry.get("n")]
-    fresh = [joke for joke in JOKES["general"]
+    bank = get_full_joke_bank()
+    fresh = [joke for joke in bank
              if not _find_matches(_joke_norm(joke), used_norms, True)
              and _joke_norm(joke) != _joke_norm(current)]
     if not fresh:
@@ -1232,7 +1304,6 @@ async def handle_command(message: Message, cmd: str) -> None:
         await say("📈 Пока мало отчётов за сегодня - подожду остальных.", message)
 
 # ============================ РАСПИСАНИЕ ============================
-# Два слота для шуток: 11:00 и 15:00
 SLOTS = [
     ("greet",   8, 30, "greeting",     False),
     ("nudge_m", 8, 55, "nudge_morning", False),
@@ -1495,6 +1566,7 @@ def admin_panel_text(note: str | None = None) -> str:
         "",
         "<i>Категории ниже для настройки.</i>",
         "<i>/say [текст] — написать в чат от имени бота.</i>",
+        "<i>/gen — сгенерировать 3 новые шутки в банк.</i>"
     ]
     if note:
         parts = [f"💬 <i>{escape(note)}</i>", ""] + parts
@@ -1578,7 +1650,6 @@ async def handle_document(message: Message):
     if not doc:
         return
     fname = doc.file_name or ""
-    # Принимаем любой .json файл
     if fname.lower().endswith(".json"):
         await _process_history_file(message, doc)
     else:
@@ -1590,14 +1661,29 @@ async def handle_private_message(message: Message) -> None:
     if not user:
         return
 
-    # Только создатель имеет доступ к боту в ЛС
     if user.id != ADMIN_ID:
         await message.reply(pick_bag("bot_mention_employee", SITUATIONS["bot_mention_employee"]))
         return
 
-    # --- Создатель ---
     text = (message.text or message.caption or "").strip()
     low = text.lower()
+
+    # Матричный генератор по команде /gen
+    if low == "/gen":
+        suggested = STATE.setdefault("suggested_jokes", {})
+        for _ in range(3):
+            joke_text = generate_auto_joke()
+            s_id = secrets.token_hex(4)
+            suggested[s_id] = joke_text
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="✅ Добавить в банк", callback_data=f"sug:add:{s_id}"),
+                    InlineKeyboardButton(text="❌ Отклонить", callback_data=f"sug:del:{s_id}")
+                ]
+            ])
+            await message.reply(f"💡 <b>Сгенерировано:</b>\n\n{escape(joke_text)}", parse_mode="HTML", reply_markup=kb)
+        save_state()
+        return
 
     # Пересланный отчёт
     fwd_dt = None
@@ -1646,7 +1732,6 @@ async def handle_private_message(message: Message) -> None:
         await message.reply("✅ Отправлено в рабочий чат." if sent else "❌ Не удалось отправить.")
         return
 
-    # Всё остальное — открываем панель управления
     await bot.send_message(ADMIN_ID, admin_panel_text(), parse_mode="HTML", reply_markup=admin_main_keyboard())
 
 # ============================ CALLBACKS СОЗДАТЕЛЯ ============================
@@ -1658,6 +1743,33 @@ async def on_callback_query(callback: CallbackQuery) -> None:
         return
     n = now()
     try:
+        # Обработчики для сгенерированных шуток
+        if data.startswith("sug:add:"):
+            token = data.split(":")[2]
+            suggested = STATE.get("suggested_jokes", {})
+            joke_text = suggested.pop(token, None)
+            if joke_text:
+                custom = STATE.setdefault("custom_jokes", [])
+                custom.append(joke_text)
+                save_state()
+                await callback.message.edit_text(f"✅ <b>Добавлено в банк!</b>\n\n{escape(joke_text)}", parse_mode="HTML")
+                await callback.answer("Успешно добавлено!")
+            else:
+                await callback.answer("Шутка уже обработана.", show_alert=True)
+            return
+
+        if data.startswith("sug:del:"):
+            token = data.split(":")[2]
+            suggested = STATE.get("suggested_jokes", {})
+            joke_text = suggested.pop(token, None)
+            if joke_text:
+                save_state()
+                await callback.message.edit_text(f"❌ <b>Отклонено.</b>\n\n<del>{escape(joke_text)}</del>", parse_mode="HTML")
+                await callback.answer("Отклонено.")
+            else:
+                await callback.answer("Шутка уже обработана.", show_alert=True)
+            return
+
         if data == "menu:main":
             await send_fresh_menu(callback, admin_panel_text(), admin_main_keyboard())
             await callback.answer()
@@ -2172,7 +2284,6 @@ async def run_slot(kind: str, fallback: bool, n: datetime) -> str:
         text = greeting_text(n)
 
     elif kind in ("nudge_morning", "nudge_midday"):
-        # grace period после активации
         if RT.resumed_ts and time.time() - RT.resumed_ts < 120:
             log.info("nudge пропускаем: grace period %d сек", int(time.time() - RT.resumed_ts))
             return "retry"
@@ -2180,7 +2291,6 @@ async def run_slot(kind: str, fallback: bool, n: datetime) -> str:
         today = biz_date(n).isoformat()
         total_count = count_reports_today(today, window)
 
-        # Если уже получено TOTAL_STORES или больше отчётов — не напоминаем
         if total_count >= TOTAL_STORES:
             log.info("nudge_%s пропускаем: %d/%d отчётов получено", window, total_count, TOTAL_STORES)
             try:
@@ -2196,11 +2306,9 @@ async def run_slot(kind: str, fallback: bool, n: datetime) -> str:
         reported = set(day_entries(today, window))
         miss = sorted(set(STORE_NAMES) - reported)
         if not miss:
-            # Все идентифицированные сдали, но сумарно меньше 16
             log.info("nudge_%s: все идентифицированные сдали (%d/%d), пропускаем", window, total_count, TOTAL_STORES)
             return "skip"
 
-        # Уведомить создателя
         try:
             await bot.send_message(
                 ADMIN_ID,
@@ -2242,6 +2350,31 @@ async def tick() -> None:
     if not get_chat_id():
         return
     today = n.date().isoformat()
+    
+    # Автогенерация шуток в ЛС администратору один раз в день (в нерабочее время)
+    if is_after_hard_mute() and STATE.get("last_auto_gen_date") != today:
+        suggested = STATE.setdefault("suggested_jokes", {})
+        joke_text = generate_auto_joke()
+        s_id = secrets.token_hex(4)
+        suggested[s_id] = joke_text
+        STATE["last_auto_gen_date"] = today
+        save_state()
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✅ Добавить в банк", callback_data=f"sug:add:{s_id}"),
+                InlineKeyboardButton(text="❌ Отклонить", callback_data=f"sug:del:{s_id}")
+            ]
+        ])
+        try:
+            await bot.send_message(
+                ADMIN_ID, 
+                f"🤖 <b>Ежедневная автогенерация шутки:</b>\n\n{escape(joke_text)}", 
+                parse_mode="HTML", 
+                reply_markup=kb
+            )
+        except Exception as e:
+            log.warning("Не удалось отправить автогенерацию в ЛС: %s", e)
+
     done = STATE["done"].setdefault(today, [])
     for old in sorted(STATE["done"])[:-3]:
         STATE["done"].pop(old, None)
@@ -2323,7 +2456,6 @@ async def main() -> None:
         if any(w in s_data for w in ("morning", "midday", "evening"))
     )
 
-    # Сообщение о перезапуске — одно, без вариантов
     if history_days > 0 and today_total > 0:
         restart_msg = (
             f"🔄 <b>Перезапустился.</b>\n\n"
