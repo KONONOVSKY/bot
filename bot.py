@@ -52,7 +52,7 @@ SPEAK_UNTIL = (19, 0)
 REACT_AFTER_HOURS = True
 SLOT_GRACE_MIN = 25
 JOKE_AFTER_MANAGER_MIN = 30
-JOKE_MAX_DELAY_MIN = 60   # окно для шутки — 1 час
+JOKE_MAX_DELAY_MIN = 60   # окно для шутки - 1 час
 
 ADMIN_ID = 486540367
 HQ_USER_IDS = {486540367, 987578033}
@@ -423,10 +423,20 @@ def store_name(name: str, user_id: int | None = None, report_text: str = "") -> 
 
 # ============================ ИСТОРИЯ / СТАТИСТИКА ============================
 def record_report(store: str, window: str, dt: datetime, rep: dict) -> bool:
-    if store not in STORE_NAMES or window not in ("morning", "midday", "evening"):
+    if window not in ("morning", "midday", "evening"):
         return False
     bd = biz_date(dt).isoformat()
     day = STATE["history"].setdefault(bd, {})
+
+    if store not in STORE_NAMES:
+        unk = day.setdefault("__unknown__", {})
+        store_data = unk.setdefault(store, {})
+        store_data[window] = {
+            "plan": rep["plan"], "fact": rep["fact"], "closed": rep["closed"],
+            "pct": rep["pct"], "t": dt.strftime("%H:%M"),
+        }
+        return True
+
     store_data = day.setdefault(store, {})
     old = store_data.get(window)
     if old and old.get("t"):
@@ -444,12 +454,13 @@ def record_report(store: str, window: str, dt: datetime, rep: dict) -> bool:
     return True
 
 def day_entries(bd: str, window: str) -> dict:
-    return {s: w[window] for s, w in STATE["history"].get(bd, {}).items() if window in w}
+    return {s: w[window] for s, w in STATE["history"].get(bd, {}).items() if s != "__unknown__" and window in w}
 
 def count_reports_today(bd: str, window: str) -> int:
     day_data = STATE["history"].get(bd, {})
-    count = sum(1 for s_data in day_data.values() if window in s_data)
-    return count
+    known = sum(1 for s, s_data in day_data.items() if s != "__unknown__" and window in s_data)
+    unk = sum(1 for s_data in day_data.get("__unknown__", {}).values() if window in s_data)
+    return known + unk
 
 def expected_stores_for_reminder(window: str, today: str) -> set:
     return set(STORE_NAMES)
@@ -595,19 +606,19 @@ JOKE_PUNCHLINES = [
     "и Роман Анатольевич молча ставит лайк.",
     "потому что без сервиса телефон не продаётся.",
     "а КРО увеличивает зум на камере.",
-    "ведь главное — уверенный зрительный контакт.",
+    "ведь главное - уверенный зрительный контакт.",
     "и где-то грустит один невыполненный KPI.",
     "потому что магия розницы работает именно так.",
     "а стажер просто идет пить валерьянку.",
     "и это только первый час работы.",
-    "потому что клиенты ОФ2 — это отдельный вид искусства.",
+    "потому что клиенты ОФ2 - это отдельный вид искусства.",
     "ведь рассрочка на 10 платежей лечит любые сомнения.",
     "и 1С решает уйти в отпуск."
 ]
 
 def generate_auto_joke() -> str:
     store = random.choice(STORE_NAMES)
-    return f"{random.choice(JOKE_SETUPS).format(store=store)} {random.choice(JOKE_ACTIONS)} — {random.choice(JOKE_PUNCHLINES)}"
+    return f"{random.choice(JOKE_SETUPS).format(store=store)} {random.choice(JOKE_ACTIONS)} - {random.choice(JOKE_PUNCHLINES)}"
 
 TECH_REPLIES = [
     "💔 1С опять не отвечает... А ведь когда-то мы с ней работали без посредников. Ладно, наберите айти.",
@@ -1434,10 +1445,10 @@ def import_history_json(data: dict, n: datetime):
         raw_from_id = str(msg.get("from_id", ""))
         id_match = re.search(r"(\d+)$", raw_from_id)
         sender_id = int(id_match.group(1)) if id_match else None
+        
         store = store_name(sender, sender_id, text_str)
         if store not in STORE_NAMES:
             unknown.add(sender)
-            continue
         record_report(store, classify_window(dt), dt, rep)
         parsed += 1
 
@@ -1601,8 +1612,8 @@ def admin_panel_text(note: str | None = None) -> str:
         escape(planned) if planned else "Нет",
         "",
         "<i>Категории ниже для настройки.</i>",
-        "<i>/say [текст] — написать в чат от имени бота.</i>",
-        "<i>/gen — сгенерировать 3 новые шутки в банк.</i>"
+        "<i>/say [текст] - написать в чат от имени бота.</i>",
+        "<i>/gen - сгенерировать 3 новые шутки в банк.</i>"
     ]
     if note:
         parts = [f"💬 <i>{escape(note)}</i>", ""] + parts
@@ -1637,21 +1648,21 @@ async def _process_history_file(message: Message, file_doc) -> None:
             f"Найдено отчётов: {res['parsed']}.",
             f"Синхронизировано до: {res['latest'].strftime('%d.%m %H:%M') if res['latest'] else '?'}.",
             f"Последним писал: {escape(author[0])}{' (руководитель)' if author[1] else ''}.",
-            f"🎭 Шутки бота: {res['jokes'][0]} из {res['jokes'][1]} уже были — повторять не буду.",
+            f"🎭 Шутки бота: {res['jokes'][0]} из {res['jokes'][1]} уже были - повторять не буду.",
             f"📊 Найдено живых шуток в истории для вайб-отчета: {res.get('vibe_jokes_count', 0)}.",
         ]
 
         if res["latest"] and res["latest"].date() < n.date():
             lines += [
                 "",
-                f"⚠️ <b>Внимание:</b> экспорт заканчивается {res['latest']:%d.%m %H:%M} — нет данных за сегодня ({n:%d.%m}).",
+                f"⚠️ <b>Внимание:</b> экспорт заканчивается {res['latest']:%d.%m %H:%M} - нет данных за сегодня ({n:%d.%m}).",
                 "Отчёты за сегодня нужно переслать отдельно или загрузить свежий экспорт.",
             ]
 
         if res["latest"] and res["latest"].date() == n.date() and res["latest"].hour >= SPEAK_UNTIL[0]:
             lines += [
                 "",
-                f"🌙 Экспорт содержит данные после {SPEAK_UNTIL[0]}:00 — бот понимает, что рабочий день завершён.",
+                f"🌙 Экспорт содержит данные после {SPEAK_UNTIL[0]}:00 - бот понимает, что рабочий день завершён.",
                 "Сегодняшние слоты будут пропущены, завтра бот стартует с утра в штатном режиме.",
             ]
 
@@ -1752,7 +1763,7 @@ async def handle_private_message(message: Message) -> None:
                 )
             return
 
-    # /say — отправить в чат от имени бота
+    # /say - отправить в чат от имени бота
     if low.startswith("/say "):
         cid = get_chat_id()
         if not cid:
@@ -2062,7 +2073,7 @@ async def on_callback_query(callback: CallbackQuery) -> None:
             if RT.resumed_ts and time.time() - RT.resumed_ts < 120:
                 secs_left = int(120 - (time.time() - RT.resumed_ts))
                 await callback.answer(
-                    f"⏳ Подожди ещё {secs_left} сек — бот дообрабатывает очередь.",
+                    f"⏳ Подожди ещё {secs_left} сек - бот дообрабатывает очередь.",
                     show_alert=True
                 )
                 return
@@ -2190,7 +2201,7 @@ async def process(message: Message, edited: bool) -> None:
                         await react(message, ["👀"])
                 return
 
-    # Создатель в общем чате — только реакции, никаких ответов
+    # Создатель в общем чате - только реакции, никаких ответов
     if user.id == ADMIN_ID:
         if is_manager(name, user.id):
             await react(message, MANAGER_REACTIONS)
@@ -2333,12 +2344,16 @@ async def run_slot(kind: str, fallback: bool, n: datetime) -> str:
 
         if total_count >= TOTAL_STORES:
             log.info("nudge_%s пропускаем: %d/%d отчётов получено", window, total_count, TOTAL_STORES)
+            reported = set(day_entries(today, window))
+            miss = sorted(set(STORE_NAMES) - reported)
+            if miss:
+                msg = (f"📊 <b>Окно {window}:</b> Получено {total_count} отчётов (есть с чужих аккаунтов).\n"
+                       f"Не сдали с официальных учёток: {', '.join(miss)}.\n"
+                       f"Напоминание в общий чат отменено ✅")
+            else:
+                msg = f"📊 <b>Окно {window}:</b> {total_count}/{TOTAL_STORES} отчётов получено - напоминание не нужно ✅"
             try:
-                await bot.send_message(
-                    ADMIN_ID,
-                    f"📊 <b>Окно {window}:</b> {total_count}/{TOTAL_STORES} отчётов получено — напоминание не нужно ✅",
-                    parse_mode="HTML"
-                )
+                await bot.send_message(ADMIN_ID, msg, parse_mode="HTML")
             except Exception:
                 pass
             return "skip"
@@ -2501,7 +2516,7 @@ async def main() -> None:
             f"🔄 <b>Перезапустился.</b>\n\n"
             f"📦 История: {history_days} дн. | Отчётов за сегодня ({n.strftime('%d.%m')}): {today_total}\n\n"
             f"Скинь свежий <b>result.json</b> (или любой .json экспорт чата) чтобы я всё актуализировал.\n"
-            f"<i>Или нажми «Запустить» — работаю с тем что есть.</i>"
+            f"<i>Или нажми «Запустить» - работаю с тем что есть.</i>"
         )
     elif history_days > 0:
         restart_msg = (
@@ -2513,7 +2528,7 @@ async def main() -> None:
         restart_msg = (
             f"🔄 <b>Перезапустился.</b> Память пустая.\n\n"
             f"📋 Скинь <b>result.json</b> (экспорт чата из Telegram Desktop) или перешли отчёты за сегодня ({n.strftime('%d.%m')}).\n"
-            f"<i>Или нажми «Запустить» — подожду 2 мин и начну работу.</i>"
+            f"<i>Или нажми «Запустить» - подожду 2 мин и начну работу.</i>"
         )
 
     keyboard = InlineKeyboardMarkup(inline_keyboard=[
