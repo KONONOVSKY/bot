@@ -2,7 +2,7 @@
 """
 TOP TEAM - рабочий бот для чата 16 магазинов (Сота Альянс, Одесский регион).
 4 режима работы (Полная активность, Без шуток, Без сообщений, Полный стоп),
-синхронизация через result.json, умный пуш должников в ЛС, матричный генератор шуток.
+синхронизация через result.json, умный пуш должников в ЛС.
 """
 from __future__ import annotations
 
@@ -52,7 +52,7 @@ SPEAK_UNTIL = (19, 0)
 REACT_AFTER_HOURS = True
 SLOT_GRACE_MIN = 25
 JOKE_AFTER_MANAGER_MIN = 30
-JOKE_MAX_DELAY_MIN = 60   # окно для шутки - 1 час
+JOKE_MAX_DELAY_MIN = 60
 
 ADMIN_ID = 486540367
 HQ_USER_IDS = {486540367, 987578033}
@@ -91,7 +91,7 @@ ALIASES = {
 
 STORE_NAMES = tuple(dict.fromkeys(STORE_BY_USER_ID.values()))
 USER_ID_BY_STORE = {v: k for k, v in STORE_BY_USER_ID.items()}
-TOTAL_STORES = len(STORE_NAMES)  # 16
+TOTAL_STORES = len(STORE_NAMES)
 
 ALLOWED = {
     "👍", "🔥", "🎉", "🤩", "😎", "🏆", "💯", "⚡", "🤝", "👌", "🫡", "🤗", "🙏", "👀",
@@ -140,8 +140,7 @@ STATE: dict = {
     "jokes_used": [], "queued_joke": None, "review_pending": {},
     "tech_reply_date": "", "fans": {},
     "bot_mode": "active", "queued_stats": None, "pm_push_enabled": True, 
-    "pending_report_push": {}, "custom_jokes": [], "suggested_jokes": {},
-    "last_auto_gen_date": "", "vibe_history_stats": {}
+    "pending_report_push": {}, "custom_jokes": []
 }
 
 class RT:
@@ -201,6 +200,9 @@ def migrate_state() -> None:
             STATE["bot_mode"] = "no_jokes"
         else:
             STATE["bot_mode"] = "active"
+    STATE.pop("suggested_jokes", None)
+    STATE.pop("vibe_history_stats", None)
+    STATE.pop("last_auto_gen_date", None)
 
 def save_state() -> None:
     try:
@@ -238,7 +240,7 @@ dp = Dispatcher()
 
 # ============================ РАЗБОР ОТЧЁТОВ И ИСТОРИИ ============================
 CAT_PATTERNS = {
-    "to": re.compile(r"^\W*(?:план\s+)?(?:[тt]\s*[оo0]|пт|то)(?![a-zа-я])(?!\s*(?:в\s+)?кредит)\s*(?:план\w*)?\s*[:\-]?\s*(?P<rest>.*)$", re.IGNORECASE),
+    "to": re.compile(r"^\W*(?:план\s+)?(?:[тt]\s*[оo0]|[оo0]\s*[тt]|пт|то|от|ot)(?![a-zа-я])(?!\s*(?:в\s+)?кредит)\s*(?:план\w*)?\s*[:\-]?\s*(?P<rest>.*)$", re.IGNORECASE),
     "smart": re.compile(r"^\W*(?:смарт|тел|смарты)\b\s*[:\-]?\s*(?P<rest>.*)$", re.IGNORECASE),
     "serv": re.compile(r"^\W*(?:серв|су|сервис)\b\s*[:\-]?\s*(?P<rest>.*)$", re.IGNORECASE),
     "aks": re.compile(r"^\W*(?:акс|аксы)\b\s*[:\-]?\s*(?P<rest>.*)$", re.IGNORECASE),
@@ -456,11 +458,11 @@ def record_report(store: str, window: str, dt: datetime, rep: dict) -> bool:
 def day_entries(bd: str, window: str) -> dict:
     return {s: w[window] for s, w in STATE["history"].get(bd, {}).items() if s != "__unknown__" and window in w}
 
-def count_reports_today(bd: str, window: str) -> int:
+def count_reports_today(bd: str, window: str) -> tuple[int, int]:
     day_data = STATE["history"].get(bd, {})
     known = sum(1 for s, s_data in day_data.items() if s != "__unknown__" and window in s_data)
     unk = sum(1 for s_data in day_data.get("__unknown__", {}).values() if window in s_data)
-    return known + unk
+    return known, unk
 
 def expected_stores_for_reminder(window: str, today: str) -> set:
     return set(STORE_NAMES)
@@ -476,7 +478,7 @@ def evening_stats(dates: list) -> dict:
                 res.setdefault(s, []).append((d, e["pct"]))
     return res
 
-# ============================ БАНК ФРАЗ И ГЕНЕРАТОР ============================
+# ============================ БАНК ФРАЗ ============================
 JOKES = {
     "general": [
         "🧮 Продавец - это когда ты гуманитарий, но рассрочку на 10 платежей с учетом допов считаешь в уме быстрее калькулятора.",
@@ -547,78 +549,6 @@ JOKES = {
         "📦 На складе всё есть, кроме именно того товара, который нужен прямо сейчас. Классика жанра.",
     ]
 }
-
-# --- Матричный генератор абсурда ---
-JOKE_SETUPS = [
-    "Когда клиент на {store} просит скидку,",
-    "Артамонов проверяет остатки на {store}, а в это время",
-    "Стелла Яссин заходит на {store}, и тут",
-    "На {store} клиент говорит «я только посмотреть», но",
-    "Пока 1С висит на {store},",
-    "Юлия Марко открывает чек с {store}, а там",
-    "Денис Гусев начинает отрабатывать возражения на {store}, и вдруг",
-    "Когда КРО подключается к камерам на {store},",
-    "На {store} терминал отказывается проводить оплату, потому что",
-    "Клиент приносит телефон по гарантии на {store}, а в итоге",
-    "Бухгалтерия звонит на {store} с вопросом по кассе, и в этот момент",
-    "Когда Роман Анатольевич спрашивает про конверсию на {store},",
-    "Стажёр на {store} впервые остаётся один в зале, и тут",
-    "Клиент просит «самый простой телефон» на {store}, но",
-    "На {store} прилетает перемещение от Артамонова, и сразу же",
-    "Когда банк думает над заявкой на рассрочку на {store},",
-    "На {store} привозят новую партию чехлов, а тем временем",
-    "К концу смены на {store} заходит клиент с пакетом мелочи, и",
-    "Когда принтер на {store} отказывается печатать договор,",
-    "На {store} клиент спрашивает пароль от Wi-Fi, а продавец"
-]
-JOKE_ACTIONS = [
-    "стажёр случайно продаёт витрину",
-    "1С просто выходит из чата",
-    "кассовый аппарат начинает играть победный марш",
-    "клиент сам себе оформляет страховку на год",
-    "кто-то незаметно клеит плёнку на терминал",
-    "принтер печатает ценники на древнегреческом",
-    "покупатель берёт рассрочку на чехол",
-    "АХО приезжает чинить дверь, но покупает роутер",
-    "конкуренты из соседнего магазина приходят за советом",
-    "все смартфоны на витрине одновременно перезагру নাসзагружаются",
-    "кредитный брокер падает в обморок от суммы чека",
-    "продавец телепортируется на склад за нужным цветом",
-    "клиент вспоминает, что у него вообще-то кнопочная Nokia",
-    "стажёр предлагает трейд-ин на кота клиента",
-    "срабатывает сигнализация от переизбытка допов в чеке",
-    "терминал списывает деньги взглядом",
-    "клиент соглашается на перенос контактов с калькулятора",
-    "продавец проводит экзорцизм вирусов",
-    "смартфон сам скачивает нужные приложения от страха",
-    "инкассация приезжает забирать нервы сотрудников"
-]
-JOKE_PUNCHLINES = [
-    "и где-то улыбается Стелла Яссин.",
-    "потому что план сам себя не закроет.",
-    "а Юлия Марко уже готовит заявление на удержание.",
-    "ведь Денис Гусев учил не сдаваться.",
-    "и это мы еще не дошли до аксессуаров.",
-    "потому что в ОФ2 нет слова «невозможно».",
-    "а Боляк просто делает скриншот для истории.",
-    "и Артамонов отменяет перемещение от греха подальше.",
-    "ведь таргет одобряет даже такие безумные заявки.",
-    "и Роман Анатольевич молча ставит лайк.",
-    "потому что без сервиса телефон не продаётся.",
-    "а КРО увеличивает зум на камере.",
-    "ведь главное - уверенный зрительный контакт.",
-    "и где-то грустит один невыполненный KPI.",
-    "потому что магия розницы работает именно так.",
-    "а стажер просто идет пить валерьянку.",
-    "и это только первый час работы.",
-    "потому что клиенты ОФ2 - это отдельный вид искусства.",
-    "ведь рассрочка на 10 платежей лечит любые сомнения.",
-    "и 1С решает уйти в отпуск."
-]
-
-def generate_auto_joke() -> str:
-    store = random.choice(STORE_NAMES)
-    return f"{random.choice(JOKE_SETUPS).format(store=store)} {random.choice(JOKE_ACTIONS)} - {random.choice(JOKE_PUNCHLINES)}"
 
 TECH_REPLIES = [
     "💔 1С опять не отвечает... А ведь когда-то мы с ней работали без посредников. Ладно, наберите айти.",
@@ -1234,7 +1164,7 @@ async def on_reaction(ev: MessageReactionUpdated):
                         pass
                     del RT.bot_msgs[ev.message_id]
                     await send_chat_message(ev.chat.id, random.choice(REMINDER_FAIL_PHRASES))
-                    mute_for(120)
+                    mute_for(30)
                     return
             else:
                 if new_emojis & NEGATIVE:
@@ -1369,10 +1299,6 @@ def import_history_json(data: dict, n: datetime):
     bot_all = []
     bot_jokes = []
     last_mgr = None
-    
-    # Сбор аналитики вайба
-    vibe_jokes = []
-    vibe_fans = {}
 
     messages = data.get("messages", [])
     for msg in messages:
@@ -1405,31 +1331,6 @@ def import_history_json(data: dict, n: datetime):
                 last_mgr = (dt, sender)
         if not text_str:
             continue
-            
-        # ================= АНАЛИЗ ВАЙБА И АНТИ-ОТЧЕТ =================
-        if not any(keyword in text_str for keyword in ["ТО:", "СМАРТ:", "План ТО:", "СЕРВ:"]):
-            reactions = msg.get('reactions', [])
-            laugh_score = 0
-            for r in reactions:
-                emoji = r.get('emoji', '')
-                count = r.get('count', 0)
-                if emoji in ['🤣', '😁', '😂']:
-                    laugh_score += count
-                # Собираем социальных фанатов, если есть блок recent (или просто считаем реакции)
-                recent_users = r.get('recent', [])
-                for user_info in recent_users:
-                    peer = user_info.get('peer_id', {})
-                    user_name = peer.get('name', '')
-                    if user_name and not is_bot_name(user_name):
-                        vibe_fans[user_name] = vibe_fans.get(user_name, 0) + 1
-
-            if laugh_score > 0:
-                vibe_jokes.append({
-                    'author': sender, 
-                    'text': text_str[:150] + "..." if len(text_str) > 150 else text_str, 
-                    'score': laugh_score
-                })
-        # ==============================================================
         
         if bot_msg:
             bot_all.append(dt)
@@ -1462,12 +1363,6 @@ def import_history_json(data: dict, n: datetime):
 
     sync_done_from_bot_messages(n, bot_slot_times)
     sync_jokes_from_history(bot_jokes)
-    
-    # Сохраняем статистику вайба в STATE
-    STATE["vibe_history_stats"] = {
-        "top_jokes": sorted(vibe_jokes, key=lambda x: x['score'], reverse=True)[:5],
-        "top_fans": sorted(vibe_fans.items(), key=lambda x: -x[1])[:5]
-    }
     save_state()
 
     return {
@@ -1477,7 +1372,6 @@ def import_history_json(data: dict, n: datetime):
         "last_mgr": last_mgr,
         "unknown": sorted(unknown),
         "jokes": joke_stats(),
-        "vibe_jokes_count": len(vibe_jokes)
     }
 
 def build_plan(n: datetime) -> str:
@@ -1510,7 +1404,8 @@ async def _grace_period_notify(n: datetime) -> None:
     all_ok = True
     for win, title in (("morning", "Утро"), ("midday", "Обед"), ("evening", "Вечер")):
         reported = set(day_entries(bd, win))
-        total_count = count_reports_today(bd, win)
+        known_count, unk_count = count_reports_today(bd, win)
+        total_count = known_count + unk_count
         if total_count >= TOTAL_STORES:
             lines.append(f"<b>{title}:</b> ✅ все {total_count} отчётов получены")
             continue
@@ -1585,7 +1480,6 @@ def admin_reports_keyboard() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="📋 Должники списком",              callback_data="admin:missing")],
         ]
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📊 Аналитика вайба",        callback_data="admin:vibe")],
         *debtor_buttons,
         [InlineKeyboardButton(text="📊 Статистика за сегодня",  callback_data="admin:stats")],
         [InlineKeyboardButton(text="🔙 Главное меню",           callback_data="menu:main")],
@@ -1613,7 +1507,6 @@ def admin_panel_text(note: str | None = None) -> str:
         "",
         "<i>Категории ниже для настройки.</i>",
         "<i>/say [текст] - написать в чат от имени бота.</i>",
-        "<i>/gen - сгенерировать 3 новые шутки в банк.</i>"
     ]
     if note:
         parts = [f"💬 <i>{escape(note)}</i>", ""] + parts
@@ -1649,7 +1542,6 @@ async def _process_history_file(message: Message, file_doc) -> None:
             f"Синхронизировано до: {res['latest'].strftime('%d.%m %H:%M') if res['latest'] else '?'}.",
             f"Последним писал: {escape(author[0])}{' (руководитель)' if author[1] else ''}.",
             f"🎭 Шутки бота: {res['jokes'][0]} из {res['jokes'][1]} уже были - повторять не буду.",
-            f"📊 Найдено живых шуток в истории для вайб-отчета: {res.get('vibe_jokes_count', 0)}.",
         ]
 
         if res["latest"] and res["latest"].date() < n.date():
@@ -1716,23 +1608,6 @@ async def handle_private_message(message: Message) -> None:
     text = (message.text or message.caption or "").strip()
     low = text.lower()
 
-    # Матричный генератор по команде /gen
-    if low == "/gen":
-        suggested = STATE.setdefault("suggested_jokes", {})
-        for _ in range(3):
-            joke_text = generate_auto_joke()
-            s_id = secrets.token_hex(4)
-            suggested[s_id] = joke_text
-            kb = InlineKeyboardMarkup(inline_keyboard=[
-                [
-                    InlineKeyboardButton(text="✅ Добавить в банк", callback_data=f"sug:add:{s_id}"),
-                    InlineKeyboardButton(text="❌ Отклонить", callback_data=f"sug:del:{s_id}")
-                ]
-            ])
-            await message.reply(f"💡 <b>Сгенерировано:</b>\n\n{escape(joke_text)}", parse_mode="HTML", reply_markup=kb)
-        save_state()
-        return
-
     # Пересланный отчёт
     fwd_dt = None
     if message.forward_date:
@@ -1791,33 +1666,6 @@ async def on_callback_query(callback: CallbackQuery) -> None:
         return
     n = now()
     try:
-        # Обработчики для сгенерированных шуток
-        if data.startswith("sug:add:"):
-            token = data.split(":")[2]
-            suggested = STATE.get("suggested_jokes", {})
-            joke_text = suggested.pop(token, None)
-            if joke_text:
-                custom = STATE.setdefault("custom_jokes", [])
-                custom.append(joke_text)
-                save_state()
-                await callback.message.edit_text(f"✅ <b>Добавлено в банк!</b>\n\n{escape(joke_text)}", parse_mode="HTML")
-                await callback.answer("Успешно добавлено!")
-            else:
-                await callback.answer("Шутка уже обработана.", show_alert=True)
-            return
-
-        if data.startswith("sug:del:"):
-            token = data.split(":")[2]
-            suggested = STATE.get("suggested_jokes", {})
-            joke_text = suggested.pop(token, None)
-            if joke_text:
-                save_state()
-                await callback.message.edit_text(f"❌ <b>Отклонено.</b>\n\n<del>{escape(joke_text)}</del>", parse_mode="HTML")
-                await callback.answer("Отклонено.")
-            else:
-                await callback.answer("Шутка уже обработана.", show_alert=True)
-            return
-
         if data == "menu:main":
             await send_fresh_menu(callback, admin_panel_text(), admin_main_keyboard())
             await callback.answer()
@@ -1910,30 +1758,11 @@ async def on_callback_query(callback: CallbackQuery) -> None:
             await callback.answer("Отправлено!")
             return
 
-        if data == "admin:vibe":
-            vibe_stats = STATE.get("vibe_history_stats", {})
-            top_jokes = vibe_stats.get("top_jokes", [])
-            top_fans = vibe_stats.get("top_fans", [])
-            
-            fans_text = "\n".join(f"👤 {escape(n)} - {c} лайков/реакций" for n, c in top_fans) if top_fans else "Нет данных из result.json"
-            
-            jokes_text = "\n\n".join(
-                f"💬 {escape(j.get('author', ''))}:\n«{escape(j.get('text', ''))}»\n❤️ Смех: {j.get('score')}"
-                for j in top_jokes
-            ) if top_jokes else "Нет данных из result.json"
-            
-            msg = f"📊 <b>Аналитика вайба (по загруженному result.json)</b>\n\n🏆 <b>Топ фанатов (социальная активность):</b>\n{fans_text}\n\n🎭 <b>Топ шуток (исключая отчеты):</b>\n{jokes_text}"
-            
-            await send_fresh_menu(callback, msg, InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="🔙 Назад", callback_data="menu:reports")]
-            ]))
-            await callback.answer()
-            return
-
         if data == "admin:push":
             bd = biz_date(n).isoformat()
             win = classify_window(n)
-            total_count = count_reports_today(bd, win)
+            known_count, unk_count = count_reports_today(bd, win)
+            total_count = known_count + unk_count
             if total_count >= TOTAL_STORES:
                 await callback.answer("Квота закрыта! Все отчёты получены.", show_alert=True)
                 return
@@ -2080,7 +1909,8 @@ async def on_callback_query(callback: CallbackQuery) -> None:
             bd = biz_date(n).isoformat()
             lines = [f"📋 <b>Не сдали отчёты за {bd}:</b>"]
             for win, title in (("morning", "Утро"), ("midday", "Обед"), ("evening", "Вечер")):
-                total_count = count_reports_today(bd, win)
+                known_count, unk_count = count_reports_today(bd, win)
+                total_count = known_count + unk_count
                 reported = set(day_entries(bd, win))
                 if total_count >= TOTAL_STORES:
                     lines.append(f"<b>{title} ({total_count}/{TOTAL_STORES}):</b> все сдали ✅")
@@ -2184,7 +2014,6 @@ async def process(message: Message, edited: bool) -> None:
         has_bot_mention = True
     directed_to_bot = (is_bot_reply or has_bot_mention)
 
-    # Разбор отчёта
     if text:
         rep = parse_report(text)
         if rep:
@@ -2200,14 +2029,24 @@ async def process(message: Message, edited: bool) -> None:
                     elif not is_manager(name, user.id) and user.id != ADMIN_ID:
                         await react(message, ["👀"])
                 return
+        else:
+            if len(text) > 15 and re.search(r'\b(то|от|смарт|серв|акс|чек|план)\b', low) and any(char.isdigit() for char in text):
+                store = store_name(name, user.id, text)
+                if store in STORE_NAMES:
+                    try:
+                        await bot.send_message(
+                            ADMIN_ID,
+                            f"⚠️ Сообщение от <b>{escape(store)}</b> ({escape(name)}) не распознано как отчёт:\n\n<pre>{escape(text)}</pre>",
+                            parse_mode="HTML"
+                        )
+                    except Exception:
+                        pass
 
-    # Создатель в общем чате - только реакции, никаких ответов
     if user.id == ADMIN_ID:
         if is_manager(name, user.id):
             await react(message, MANAGER_REACTIONS)
         return
 
-    # Руководитель
     if is_manager(name, user.id):
         await react(message, MANAGER_REACTIONS)
         if not edited:
@@ -2340,18 +2179,20 @@ async def run_slot(kind: str, fallback: bool, n: datetime) -> str:
             return "retry"
         window = "morning" if kind == "nudge_morning" else "midday"
         today = biz_date(n).isoformat()
-        total_count = count_reports_today(today, window)
+        known_count, unk_count = count_reports_today(today, window)
+        total_count = known_count + unk_count
 
         if total_count >= TOTAL_STORES:
             log.info("nudge_%s пропускаем: %d/%d отчётов получено", window, total_count, TOTAL_STORES)
             reported = set(day_entries(today, window))
             miss = sorted(set(STORE_NAMES) - reported)
+            unk_keys = list(STATE["history"].get(today, {}).get("__unknown__", {}).keys())
+            msg = f"📊 <b>Окно {window}:</b> Получено {total_count} отчётов (из них {unk_count} с неизвестных аккаунтов).\n"
             if miss:
-                msg = (f"📊 <b>Окно {window}:</b> Получено {total_count} отчётов (есть с чужих аккаунтов).\n"
-                       f"Не сдали с официальных учёток: {', '.join(miss)}.\n"
-                       f"Напоминание в общий чат отменено ✅")
-            else:
-                msg = f"📊 <b>Окно {window}:</b> {total_count}/{TOTAL_STORES} отчётов получено - напоминание не нужно ✅"
+                msg += f"Не сдали с официальных учёток: {', '.join(miss)}.\n"
+            if unk_keys:
+                msg += f"Неизвестные аккаунты: {', '.join(unk_keys)}.\n"
+            msg += "Напоминание в общий чат отменено ✅"
             try:
                 await bot.send_message(ADMIN_ID, msg, parse_mode="HTML")
             except Exception:
@@ -2365,9 +2206,10 @@ async def run_slot(kind: str, fallback: bool, n: datetime) -> str:
             return "skip"
 
         try:
+            warning = f" (⚠️ Неопознанных: {unk_count})" if unk_count > 0 else ""
             await bot.send_message(
                 ADMIN_ID,
-                f"📊 <b>Окно {window}:</b> {total_count}/{TOTAL_STORES} отчётов.\n"
+                f"📊 <b>Окно {window}:</b> {total_count}/{TOTAL_STORES} отчётов.{warning}\n"
                 f"Не идентифицированы или не сдали: {', '.join(miss[:8])}{'...' if len(miss) > 8 else ''}\n"
                 f"Отправлено напоминание в группу.",
                 parse_mode="HTML"
@@ -2405,30 +2247,6 @@ async def tick() -> None:
     if not get_chat_id():
         return
     today = n.date().isoformat()
-    
-    # Автогенерация шуток в ЛС администратору один раз в день (в нерабочее время)
-    if is_after_hard_mute() and STATE.get("last_auto_gen_date") != today:
-        suggested = STATE.setdefault("suggested_jokes", {})
-        joke_text = generate_auto_joke()
-        s_id = secrets.token_hex(4)
-        suggested[s_id] = joke_text
-        STATE["last_auto_gen_date"] = today
-        save_state()
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [
-                InlineKeyboardButton(text="✅ Добавить в банк", callback_data=f"sug:add:{s_id}"),
-                InlineKeyboardButton(text="❌ Отклонить", callback_data=f"sug:del:{s_id}")
-            ]
-        ])
-        try:
-            await bot.send_message(
-                ADMIN_ID, 
-                f"🤖 <b>Ежедневная автогенерация шутки:</b>\n\n{escape(joke_text)}", 
-                parse_mode="HTML", 
-                reply_markup=kb
-            )
-        except Exception as e:
-            log.warning("Не удалось отправить автогенерацию в ЛС: %s", e)
 
     done = STATE["done"].setdefault(today, [])
     for old in sorted(STATE["done"])[:-3]:
