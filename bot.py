@@ -1432,8 +1432,65 @@ def admin_reports_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="🔙 Главное меню",          callback_data="menu:main")],
     ])
 
+def _report_status_block(n: datetime) -> str:
+    """Компактный блок статистики отчётов по всем окнам для панели создателя."""
+    bd = biz_date(n).isoformat()
+    day_data = STATE["history"].get(bd, {})
+    all_unknown = day_data.get("__unknown__", {})
+
+    WIN_META = [
+        ("morning", "☀️ Утро",  "до 11:00"),
+        ("midday",  "🌤 Обед",  "11:00–16:30"),
+        ("evening", "🌙 Вечер", "после 16:30"),
+    ]
+
+    # Какие окна вообще имеют хоть что-то?
+    active_windows = []
+    for win, label, hint in WIN_META:
+        known, unk = count_reports_today(bd, win)
+        if known + unk > 0:
+            active_windows.append((win, label, hint, known, unk))
+
+    if not active_windows:
+        return f"📭 <b>Отчётов за {n.strftime('%d.%m')} ещё нет</b>"
+
+    lines = [f"📊 <b>Отчёты {n.strftime('%d.%m')} ({TOTAL_STORES} магазинов):</b>"]
+
+    for win, label, hint, known, unk in active_windows:
+        total = known + unk
+        bar_filled = round(total / TOTAL_STORES * 8)
+        bar = "█" * bar_filled + "░" * (8 - bar_filled)
+
+        # Прогресс-строка
+        lines.append(f"\n{label} <code>[{bar}]</code> <b>{total}/{TOTAL_STORES}</b>")
+
+        # Магазины-молчуны
+        reported_stores = set(day_entries(bd, win).keys())
+        missing = sorted(set(STORE_NAMES) - reported_stores)
+
+        # Строка: из магазинов / сторонних
+        src_parts = [f"✅ магазинов: <b>{known}</b>"]
+        if unk > 0:
+            unk_names = [k for k, v in all_unknown.items() if win in v]
+            unk_short = ", ".join(unk_names[:3]) + ("…" if len(unk_names) > 3 else "")
+            src_parts.append(f"👤 сторонних: <b>{unk}</b> ({escape(unk_short)})")
+        lines.append("   " + " · ".join(src_parts))
+
+        # Не сдали (компактно)
+        if missing:
+            miss_short = ", ".join(missing[:5])
+            if len(missing) > 5:
+                miss_short += f" и ещё {len(missing) - 5}"
+            lines.append(f"   ❌ не сдали: <i>{escape(miss_short)}</i>")
+        else:
+            lines.append("   🎉 все магазины сдали!")
+
+    return "\n".join(lines)
+
+
 def admin_panel_text(note: str | None = None) -> str:
-    planned = queued_joke_for(now())
+    n       = now()
+    planned = queued_joke_for(n)
     mode    = get_bot_mode()
     status_map = {
         "stop":       "🔴 ПОЛНЫЙ СТОП",
@@ -1450,6 +1507,8 @@ def admin_panel_text(note: str | None = None) -> str:
         "👑 <b>Панель управления TOP TEAM</b>",
         f"Режим: <b>{status}</b>",
         f"Мут: <b>{mute_status}</b>",
+        "",
+        _report_status_block(n),
         "",
         "🎭 <b>Следующая шутка:</b>",
         escape(planned) if planned else "Нет",
